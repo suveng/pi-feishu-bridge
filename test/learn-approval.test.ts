@@ -9,8 +9,9 @@
  * 覆盖重点：
  *   - 状态映射（认不出的状态绝不能当成「已批准」）
  *   - 审批定义取控件 / form 构造（决定实例能不能建出来）
- *   - 轮询到终态与超时（超时也绝不能放行）
- *   - 建实例失败要抛错，不能静默返回「通过」
+ *   - create() 只建单不轮询、query() 按实例号查一次（拆分后的主形态）
+ *   - 轮询到终态与超时（超时也绝不能放行）；超时后同一实例号可续查
+ *   - 建实例失败要抛错 / 返回 ok=false，不能静默返回「通过」
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -19,6 +20,7 @@ import {
   LearnApprovalClient,
   buildInstanceForm,
   formatApprovalOutcome,
+  formatSubmitOutcome,
   mapInstanceStatus,
   pickFormWidget,
 } from "../src/feishu/learn-approval.ts";
@@ -234,4 +236,110 @@ test("主流程：审批定义只查一次（缓存），不白吃限频", async
   await client.request({ body: "b", applicantOpenId: "ou_user" });
   const definitionCalls = api.calls.filter((c) => c.method === "GET" && c.url.includes("/approvals/"));
   assert.equal(definitionCalls.length, 1);
+});
+
+/* ---------------- 拆分后的 create() / query() ---------------- */
+
+test("create：只建单立即返回实例号，不查状态", async () => {
+  const api = fakeApi({ widget: { id: "w1", type: "textarea" }, statuses: ["APPROVED"] });
+  const result = await makeClient(api).create({ body: "候选点 8", applicantOpenId: "ou_user" });
+  assert.deepEqual(result, { ok: true, instanceCode: "INST-1" });
+  const polls = api.calls.filter((c) => c.method === "GET" && c.url.includes("/instances/"));
+  assert.equal(polls.length, 0, "create 不应查状态（等审批人会卡死整轮对话）");
+});
+
+test("create：拿不到发起人 / 定义缺控件 / 建单失败都返回 ok=false，不抛错", async () => {
+  const noApplicant = fakeApi({ widget: { id: "w1", type: "input" } });
+  const r1 = await makeClient(noApplicant).create({ body: "a", applicantOpenId: "" });
+  assert.equal(r1.ok, false);
+  assert.equal(noApplicant.calls.length, 0, "没有发起人时不该打飞书接口");
+
+  const noWidget = fakeApi({ widget: undefined });
+  const r2 = await makeClient(noWidget).create({ body: "a", applicantOpenId: "ou_user" });
+  assert.equal(r2.ok, false);
+  assert.match(r2.detail ?? "", /找不到可填写的文本控件/);
+
+  const createFails = fakeApi({ widget: { id: "w1", type: "input" }, createFails: true });
+  const r3 = await makeClient(createFails).create({ body: "a", applicantOpenId: "ou_user" });
+  assert.equal(r3.ok, false);
+  assert.match(r3.detail ?? "", /创建审批实例失败/);
+});
+
+test("query：四种状态逐一映射，认不出的值仍按在途", async () => {
+  const cases: Array<[string, string]> = [
+    ["APPROVED", "APPROVED"],
+    ["REJECTED", "REJECTED"],
+    ["CANCELED", "CANCELED"],
+    ["PENDING", "PENDING"],
+    ["SOMETHING_NEW", "PENDING"],
+  ];
+  for (const [raw, expected] of cases) {
+    const api = fakeApi({ widget: { id: "w1", type: "input" }, statuses: [raw] });
+    const result = await makeClient(api).query("INST-9");
+    assert.equal(result.status, expected, `飞书状态 ${raw} 应映射成 ${expected}`);
+    assert.equal(result.instanceCode, "INST-9");
+  }
+});
+
+test("query：PENDING 不是通过；空实例号 / 查询失败一律按在途", async () => {
+  const pending = fakeApi({ widget: { id: "w1", type: "input" }, statuses: ["PENDING"] });
+  const r1 = await makeClient(pending).query("INST-1");
+  assert.equal(r1.status, "PENDING");
+  assert.ok(!formatApprovalOutcome(r1).includes("可以按被授权的候选点落地"), "PENDING 不得放行");
+
+  const empty = fakeApi({ widget: { id: "w1", type: "input" } });
+  const r2 = await makeClient(empty).query("  ");
+  assert.equal(r2.status, "PENDING");
+  assert.equal(empty.calls.length, 0, "空实例号不该打接口");
+
+  const broken = { async request() { throw new Error("boom"); } };
+  const r3 = await makeClient(broken).query("INST-2");
+  assert.equal(r3.status, "PENDING");
+  assert.match(r3.detail ?? "", /查询审批状态失败/);
+});
+
+test("断档后续查：超时后拿同一实例号能查到 APPROVED，且不重发第二张单", async () => {
+  let clock = 0;
+  const statuses = ["PENDING", "PENDING"];
+  const api = {
+    calls: [] as Array<{ url: string; method: string; data?: any }>,
+    async request(args: { url: string; method: string; data?: any }) {
+      api.calls.push(args);
+      if (args.method === "GET" && args.url.includes("/approvals/")) {
+        return { data: { form: JSON.stringify({ widgets: [{ id: "w1", type: "input" }] }) } };
+      }
+      if (args.method === "POST") return { data: { instance_code: "INST-7" } };
+      return { data: { status: statuses.length > 1 ? statuses.shift()! : statuses[0] } };
+    },
+  };
+  const client = new LearnApprovalClient({
+    api,
+    config: { approvalCode: "AP-1", timeoutSec: 10, pollIntervalSec: 1 },
+    sleep: async () => {
+      clock += 4000;
+    },
+    now: () => clock,
+    log: () => {},
+  });
+
+  const timedOut = await client.request({ body: "候选点 9", applicantOpenId: "ou_user" });
+  assert.equal(timedOut.status, "TIMEOUT");
+  assert.equal(timedOut.instanceCode, "INST-7");
+  assert.equal(api.calls.filter((c) => c.method === "POST").length, 1, "超时不应重发");
+  // 超时文案必须让人去「续查同一实例号」，而不是重发
+  assert.ok(formatApprovalOutcome(timedOut).includes("不要重发"));
+
+  statuses.length = 0;
+  statuses.push("APPROVED");
+  const again = await client.query(timedOut.instanceCode!);
+  assert.equal(again.status, "APPROVED");
+  assert.ok(formatApprovalOutcome(again).includes("可以按被授权的候选点落地"));
+  assert.equal(api.calls.filter((c) => c.method === "POST").length, 1, "续查不能再建单");
+});
+
+test("提交文案：失败不放行；成功给实例号并禁止重复提交", () => {
+  assert.match(formatSubmitOutcome({ ok: false, detail: "没配审批" }), /一个字都不要改/);
+  const text = formatSubmitOutcome({ ok: true, instanceCode: "INST-3" });
+  assert.match(text, /INST-3/);
+  assert.match(text, /不要重复提交/);
 });

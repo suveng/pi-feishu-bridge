@@ -23,7 +23,7 @@ import {
 import { BotUnavailableError, FeishuTransport } from "../../feishu/transport.ts";
 import type { FeishuConfig, FeishuStatus } from "../../feishu/types.ts";
 import { createCardActionHandler } from "../../feishu/card-actions.ts";
-import { LearnApprovalClient, type LearnApprovalResult } from "../../feishu/learn-approval.ts";
+import { LearnApprovalClient } from "../../feishu/learn-approval.ts";
 import { PiConversationRuntime, handlePiMessageEnd } from "./PiConversationRuntime.ts";
 
 /**
@@ -80,27 +80,36 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     await activeTransport.updateCard(messageId, card);
   });
   // 进化审批：把 /learn 的落地变成一道必须过的飞书审批。
-  // 审批单的审批人、表单结构在飞书审批定义里；这里只负责拿发起人 → 建实例 → 等结果。
-  conversations.setLearnApprovalRequester(async (key, body): Promise<LearnApprovalResult> => {
+  // 审批单的审批人、表单结构在飞书审批定义里；这里只负责拿配置与发起人。
+  // 提交与查询拆开：提交只建单、立即返回实例号，绝不在一次工具调用里等审批人。
+  const buildLearnApprovalClient = (): LearnApprovalClient => {
     const activeTransport = transport;
     if (!activeTransport) throw new Error("飞书连接未启动，无法发起审批");
-    const cfg = loadConfig();
-    const approval = cfg?.learnApproval;
+    const approval = loadConfig()?.learnApproval;
     if (!approval) {
       throw new Error(
         "未配置进化审批：请在飞书审批后台建一个带「多行文本」控件的审批，"
         + "再把它的 approval_code 写进 ~/.pi/agent/feishu/config.pi.json 的 learnApproval.approvalCode",
       );
     }
-    // 发起人取自该会话最近一条消息的发送者：审批单里要显示是谁要进化
-    const senderOpenId = bridgeStore.getRoute(key)?.senderOpenId;
-    if (!senderOpenId) throw new Error("拿不到该会话的发送人 open_id，无法发起审批");
-    const client = new LearnApprovalClient({
+    return new LearnApprovalClient({
       api: { request: (args) => activeTransport.requestApi(args) },
       config: approval,
       log: (event, data) => debugLog(event, (data ?? {}) as Record<string, unknown>),
     });
-    return client.request({ body, applicantOpenId: senderOpenId });
+  };
+
+  // 【提交】只建单：发起人取自该会话最近一条消息的发送者（审批单里要显示是谁要进化）
+  conversations.setLearnApprovalSubmitter(async (key, body) => {
+    const client = buildLearnApprovalClient();
+    const senderOpenId = bridgeStore.getRoute(key)?.senderOpenId;
+    if (!senderOpenId) throw new Error("拿不到该会话的发送人 open_id，无法发起审批");
+    return client.create({ body, applicantOpenId: senderOpenId });
+  });
+
+  // 【查询】按实例号查一次状态：给「超时 / 被打断后用同一张单续查」用，不重发
+  conversations.setLearnApprovalQuerier(async (_key, instanceCode) => {
+    return buildLearnApprovalClient().query(instanceCode);
   });
   // 事件总线仅作为同总线场景（扩展与桥接在同一 loader 下）的补充
   try {

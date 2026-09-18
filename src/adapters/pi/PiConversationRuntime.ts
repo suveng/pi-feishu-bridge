@@ -29,7 +29,12 @@ import {
   type AskQuestion,
 } from "../../feishu/ask.ts";
 import { ensureWorkspaceExists, resolveWorkspacePath } from "../../feishu/workspace.ts";
-import { formatApprovalOutcome, type LearnApprovalResult } from "../../feishu/learn-approval.ts";
+import {
+  formatApprovalOutcome,
+  formatSubmitOutcome,
+  type LearnApprovalResult,
+  type LearnApprovalSubmitResult,
+} from "../../feishu/learn-approval.ts";
 
 /**
  * Pi Runtime 适配器：
@@ -110,19 +115,32 @@ export class PiConversationRuntime implements ConversationRuntime {
   /** 原地刷新提问卡片的能力（patch 同一条消息），由适配器注入 */
   private askCardUpdater?: (messageId: string, card: object) => Promise<void>;
   /**
-   * 发起「进化审批」的能力，由适配器注入（需要飞书连接与审批配置，Runtime 层不直接碰）。
-   * 传当前会话 key 与候选点正文，返回审批结果。
+   * 【只提交】「进化审批」的能力，由适配器注入（需要飞书连接与审批配置，Runtime 层不直接碰）。
+   * 传当前会话 key 与候选点正文，**立即**返回实例号，不等审批人。
    */
-  private learnApprovalRequester?: (key: string, body: string) => Promise<LearnApprovalResult>;
+  private learnApprovalSubmitter?: (key: string, body: string) => Promise<LearnApprovalSubmitResult>;
+  /**
+   * 【只查询】按实例号查一次审批状态，由适配器注入。
+   * 与提交拆开的原因：审批人要多久才点没有上限，提交后不能把整轮对话挂在等待上；
+   * 超时/中断后靠这个能力拿同一个实例号续查，而不是重发一张单。
+   */
+  private learnApprovalQuerier?: (key: string, instanceCode: string) => Promise<LearnApprovalResult>;
 
   /** 由适配器注入卡片发送器（飞书连接就绪后调用） */
   setAskSender(sender: (key: string, card: object) => Promise<string | undefined>) {
     this.askSender = sender;
   }
 
-  /** 由适配器注入进化审批发起器（飞书连接就绪后调用） */
-  setLearnApprovalRequester(requester: (key: string, body: string) => Promise<LearnApprovalResult>) {
-    this.learnApprovalRequester = requester;
+  /** 由适配器注入进化审批【提交器】（飞书连接就绪后调用）：只建单，不等结果 */
+  setLearnApprovalSubmitter(
+    submitter: (key: string, body: string) => Promise<LearnApprovalSubmitResult>,
+  ) {
+    this.learnApprovalSubmitter = submitter;
+  }
+
+  /** 由适配器注入进化审批【查询器】（飞书连接就绪后调用）：按实例号查一次状态 */
+  setLearnApprovalQuerier(querier: (key: string, instanceCode: string) => Promise<LearnApprovalResult>) {
+    this.learnApprovalQuerier = querier;
   }
 
   /** 由适配器注入卡片更新器：超时后把卡片刷成「已超时」用 */
@@ -865,46 +883,93 @@ export class PiConversationRuntime implements ConversationRuntime {
   }
 
   /**
-   * 进化审批工具：把「改文件」这件事变成一道必须过的审批。
+   * 进化审批工具（两个）：把「改文件」这件事变成一道必须过的审批。
    *
+   * - `feishu_learn_approval_submit`：只建单，**立即返回实例号**，不等审批人。
+   * - `feishu_learn_approval_status`：按实例号查一次状态，给「隔一会儿续查」用。
+   *
+   * 拆成两个的原因：审批人可能十分钟后才点，旧工具在一个 execute 里 await 轮询到超时，
+   * 会把整轮对话卡死，且期间一旦打断（插话 / resume）就永远拿不到结论——实例其实建好了。
    * 与 feishu_ask 一样是**会话级注入**的：需要当前会话的 key 才能拿到发起人 open_id。
    * 本地「派」（无飞书桥接）不会注册本工具，因此 /learn 应用 在派里会退化提示。
    */
-  private buildLearnApprovalTool(sessionKey: string) {
-    return {
-      name: "feishu_learn_approval",
-      label: "Feishu Learn Approval",
-      description:
-        "Submit a Feishu approval request for an evolution (/learn) and wait for the result. "
-        + "Returns APPROVED / REJECTED / CANCELED / TIMEOUT. ONLY when it returns APPROVED may you modify any file.",
-      promptSnippet: "Ask the approver to approve an evolution (/learn) via a real Feishu approval form.",
-      promptGuidelines: [
-        "Before modifying ANY file for /learn 应用, call feishu_learn_approval and wait for APPROVED.",
-        "Put the authorized candidate points verbatim into body so the approver knows exactly what will be changed.",
-        "If the result is not APPROVED, do NOT modify anything and report the status to the user.",
-      ],
-      parameters: Type.Object({
-        body: Type.String({
-          description:
-            "Approval content: the candidate points to be applied (id, target file, what will change). Be specific.",
+  private buildLearnApprovalTools(sessionKey: string) {
+    return [
+      {
+        name: "feishu_learn_approval_submit",
+        label: "Feishu Learn Approval Submit",
+        description:
+          "Submit a Feishu approval instance for an evolution (/learn) and return its instance code immediately. "
+          + "It does NOT wait for the approver. Check the outcome later with feishu_learn_approval_status. "
+          + "ONLY an APPROVED result may you modify any file.",
+        promptSnippet: "Submit an evolution (/learn) approval request to a real Feishu approval form.",
+        promptGuidelines: [
+          "Before modifying ANY file for /learn 应用, call feishu_learn_approval_submit, then poll feishu_learn_approval_status with the instance code.",
+          "Put the authorized candidate points verbatim into body so the approver knows exactly what will be changed.",
+          "Never submit a second instance for the same approval: reuse the instance code you already got.",
+        ],
+        parameters: Type.Object({
+          body: Type.String({
+            description:
+              "Approval content: the candidate points to be applied (id, target file, what will change). Be specific.",
+          }),
         }),
-      }),
-      execute: async (_toolCallId: string, params: unknown) => {
-        const body = String((params as { body?: unknown })?.body ?? "").trim();
-        if (!body) return askToolResult("Error: body 不能为空，请填要落地的候选点内容。");
-        if (!this.learnApprovalRequester) {
-          return askToolResult(
-            "Error: 当前环境没有接入飞书审批通道，无法为进化取授权。请在飞书会话里执行 /learn 应用 <编号>。",
-          );
-        }
-        try {
-          return askToolResult(formatApprovalOutcome(await this.learnApprovalRequester(sessionKey, body)));
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          return askToolResult(`Error: 发起/等待进化审批失败：${message}。一个字都不要改，把原因告诉用户。`);
-        }
+        execute: async (_toolCallId: string, params: unknown) => {
+          const body = String((params as { body?: unknown })?.body ?? "").trim();
+          if (!body) return askToolResult("Error: body 不能为空，请填要落地的候选点内容。");
+          if (!this.learnApprovalSubmitter) {
+            return askToolResult(
+              "Error: 当前环境没有接入飞书审批通道，无法为进化取授权。请在飞书会话里执行 /learn 应用 <编号>。",
+            );
+          }
+          try {
+            return askToolResult(formatSubmitOutcome(await this.learnApprovalSubmitter(sessionKey, body)));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return askToolResult(`Error: 提交进化审批失败：${message}。一个字都不要改，把原因告诉用户。`);
+          }
+        },
       },
-    };
+      {
+        name: "feishu_learn_approval_status",
+        label: "Feishu Learn Approval Status",
+        description:
+          "Check one Feishu approval instance by its instance code. "
+          + "Returns APPROVED / PENDING / REJECTED / CANCELED. ONLY APPROVED authorizes file changes; "
+          + "a timeout or interruption is NOT a rejection — query the same instance code again instead of resubmitting.",
+        promptSnippet: "Query the status of a submitted evolution (/learn) approval instance.",
+        promptGuidelines: [
+          "Never modify any file unless this tool returns APPROVED.",
+          "Reuse the instance code from feishu_learn_approval_submit; do not create a second instance.",
+        ],
+        parameters: Type.Object({
+          instanceCode: Type.String({
+            description: "The approval instance code returned by feishu_learn_approval_submit.",
+          }),
+        }),
+        execute: async (_toolCallId: string, params: unknown) => {
+          const instanceCode = String((params as { instanceCode?: unknown })?.instanceCode ?? "").trim();
+          if (!instanceCode) return askToolResult("Error: instanceCode 不能为空。");
+          if (!this.learnApprovalQuerier) {
+            return askToolResult(
+              "Error: 当前环境没有接入飞书审批通道，无法查询审批状态。请在飞书会话里执行 /learn 应用 <编号>。",
+            );
+          }
+          try {
+            return askToolResult(
+              formatApprovalOutcome(await this.learnApprovalQuerier(sessionKey, instanceCode)),
+            );
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            // 查不到绝不放行：告诉模型按在途处理，拿同一实例号再查
+            return askToolResult(
+              `Error: 查询进化审批状态失败：${message}。一个字都不要改；`
+              + `稍后用 feishu_learn_approval_status 传同一实例号 ${instanceCode} 续查（不要重复提交）。`,
+            );
+          }
+        },
+      },
+    ];
   }
 
   /**
@@ -1023,8 +1088,16 @@ export class PiConversationRuntime implements ConversationRuntime {
       sessionManager,
       resourceLoader: loader,
       // 选择题卡片工具只在飞书会话里有意义，故按会话注入而不是扩展注册
-      customTools: [this.buildAskTool(key), this.buildLearnApprovalTool(key)],
+      customTools: [this.buildAskTool(key), ...this.buildLearnApprovalTools(key)],
     } as any);
+
+    // 诊断日志：确认自定义工具确实注入到了这个会话。
+    // 用于定位「插话 / resume 之后工具从工具表消失」到底是桥接没注入，还是 pi 侧在中断轮次后不再暴露。
+    debugLog("feishu.tools_injected", {
+      key,
+      sessionId: session.sessionId,
+      tools: ["feishu_ask", "feishu_learn_approval_submit", "feishu_learn_approval_status"],
+    });
 
     await session.bindExtensions({});
     this.bridge?.attachSession(key, session.sessionId);
