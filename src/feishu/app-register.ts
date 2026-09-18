@@ -18,6 +18,13 @@ export async function registerFeishuApp(options?: { onNotify?: (text: string) =>
 
   const result = await lark.registerApp({
     source: "pi-feishu-extension",
+    // 增量申请「斜杠指令」权限：扫码确认页会在此基础上叠加，平台基础权限不受影响。
+    // 若平台未开放额外配置灰度，该参数会被忽略并回退到默认流程。
+    addons: {
+      scopes: {
+        tenant: ["application:app_slash_command:write"],
+      },
+    },
     onQRCodeReady(info: { url: string; expireIn: number }) {
       qrcode.generate(info.url, { small: true }, (qr) => {
         console.log("\n飞书/Lark 授权二维码 / Feishu/Lark authorization QR code");

@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseGroupKeywords } from "./group-trigger.ts";
 import { applyRuntimeOverrides, getRuntimeOverrides, setRuntimeOverridesPath } from "./runtime-config.ts";
-import type { CardActionMode, Domain, FeishuConfig, GroupPolicy } from "./types.ts";
+import type { CardActionMode, Domain, FeishuConfig, GroupPolicy, LearnApprovalConfig } from "./types.ts";
 
 export const ROOT_DIR = join(homedir(), ".pi", "agent", "feishu");
 
@@ -122,6 +122,7 @@ export const DEFAULT_CONFIG: Pick<
   | "streamFirstFlushMs"
   | "streamMinChars"
   | "streamMaxBodyChars"
+  | "messageDelivery"
 > = {
   domain: "feishu",
   groupPolicy: "open",
@@ -143,6 +144,8 @@ export const DEFAULT_CONFIG: Pick<
   promptTimeoutSec: 0,
   sendMaxRetries: 2,
   streamingReply: true,
+  // 正在生成时又收到新消息：默认排队（与历史行为一致），可改 interrupt 立即打断
+  messageDelivery: "queue",
   // CardKit 客户端逐字打印
   streamPrintFrequencyMs: 50,
   streamPrintStep: 1,
@@ -241,6 +244,7 @@ function numberOr(value: unknown, fallback: number) {
 function applyRuntimeDefaults(cfg: FeishuConfig): FeishuConfig {
   return {
     ...cfg,
+    learnApproval: parseLearnApproval(cfg.learnApproval),
     groupKeywords: Array.isArray(cfg.groupKeywords)
       ? parseGroupKeywords(cfg.groupKeywords)
       : (cfg.groupKeywords ?? DEFAULT_CONFIG.groupKeywords),
@@ -253,6 +257,7 @@ function applyRuntimeDefaults(cfg: FeishuConfig): FeishuConfig {
     promptTimeoutSec: numberOr(cfg.promptTimeoutSec, DEFAULT_CONFIG.promptTimeoutSec!),
     sendMaxRetries: cfg.sendMaxRetries ?? DEFAULT_CONFIG.sendMaxRetries,
     streamingReply: cfg.streamingReply ?? DEFAULT_CONFIG.streamingReply,
+    messageDelivery: cfg.messageDelivery ?? DEFAULT_CONFIG.messageDelivery,
     streamPrintFrequencyMs: cfg.streamPrintFrequencyMs ?? DEFAULT_CONFIG.streamPrintFrequencyMs,
     streamPrintStep: cfg.streamPrintStep ?? DEFAULT_CONFIG.streamPrintStep,
     streamPushIntervalMs: cfg.streamPushIntervalMs ?? DEFAULT_CONFIG.streamPushIntervalMs,
@@ -306,6 +311,10 @@ export function loadBaseConfig(): FeishuConfig | undefined {
       streamFirstFlushMs: parsePositiveInt(env("STREAM_FIRST_FLUSH_MS"), DEFAULT_CONFIG.streamFirstFlushMs!),
       streamMinChars: parsePositiveInt(env("STREAM_MIN_CHARS"), DEFAULT_CONFIG.streamMinChars!),
       streamMaxBodyChars: parsePositiveInt(env("STREAM_MAX_BODY_CHARS"), DEFAULT_CONFIG.streamMaxBodyChars!),
+      // 进化审批：环境变量只提供 approval_code，超时/轮询间隔走默认值
+      learnApproval: parseLearnApproval(
+        env("LEARN_APPROVAL_CODE") ? { approvalCode: env("LEARN_APPROVAL_CODE") } : undefined,
+      ),
     });
   }
   if (!existsSync(source.configPath)) return undefined;
@@ -333,6 +342,7 @@ export function loadBaseConfig(): FeishuConfig | undefined {
     promptTimeoutSec: numberOr(cfg.promptTimeoutSec, DEFAULT_CONFIG.promptTimeoutSec!),
     sendMaxRetries: cfg.sendMaxRetries,
     streamingReply: cfg.streamingReply,
+    messageDelivery: cfg.messageDelivery,
     streamPrintFrequencyMs: cfg.streamPrintFrequencyMs,
     streamPrintStep: cfg.streamPrintStep,
     streamPushIntervalMs: cfg.streamPushIntervalMs,
@@ -340,12 +350,31 @@ export function loadBaseConfig(): FeishuConfig | undefined {
     streamFirstFlushMs: cfg.streamFirstFlushMs,
     streamMinChars: cfg.streamMinChars,
     streamMaxBodyChars: cfg.streamMaxBodyChars,
+    learnApproval: parseLearnApproval(cfg.learnApproval),
   });
 }
 
 function parseCardActionMode(value: unknown): CardActionMode | undefined {
   if (value !== "webhook" && value !== "ws") return undefined;
   return value;
+}
+
+/**
+ * 解析进化审批配置。
+ * approvalCode 是必需项：没有它就说明用户还没在飞书审批后台建好审批定义，
+ * 此时整个 learnApproval 视为未配置，/learn 应用 会明确提示去配。
+ */
+export function parseLearnApproval(value: unknown): LearnApprovalConfig | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const approvalCode = typeof raw.approvalCode === "string" ? raw.approvalCode.trim() : "";
+  if (!approvalCode) return undefined;
+  return {
+    approvalCode,
+    timeoutSec: typeof raw.timeoutSec === "number" && raw.timeoutSec > 0 ? Math.floor(raw.timeoutSec) : undefined,
+    pollIntervalSec:
+      typeof raw.pollIntervalSec === "number" && raw.pollIntervalSec > 0 ? Math.floor(raw.pollIntervalSec) : undefined,
+  };
 }
 
 function parsePort(value: string | undefined) {

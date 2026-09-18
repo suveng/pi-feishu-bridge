@@ -15,6 +15,7 @@ export const RUNTIME_CONFIG_KEYS = [
   "streamPrintFrequencyMs",
   "streamPrintStep",
   "streamPushIntervalMs",
+  "messageDelivery",
 ] as const;
 
 export type RuntimeConfigKey = (typeof RUNTIME_CONFIG_KEYS)[number];
@@ -31,6 +32,12 @@ export type RuntimeConfigView = {
   streamPrintFrequencyMs?: number;
   streamPrintStep?: number;
   streamPushIntervalMs?: number;
+  /**
+   * 正在生成回复时又收到新消息的处理方式：
+   * - queue（默认）：排队，等上一条跑完再处理（当前行为）
+   * - interrupt：立即打断当前生成，用新消息开新一轮
+   */
+  messageDelivery?: "queue" | "interrupt";
   [key: string]: unknown;
 };
 
@@ -77,6 +84,12 @@ export function parseRuntimeConfigValue(key: string, raw: string): ParseResult {
         return { ok: false, error: "language 仅支持 zh | en" };
       }
       return { ok: true, value: text };
+    }
+    case "messageDelivery": {
+      if (text !== "queue" && text !== "interrupt") {
+        return { ok: false, error: "messageDelivery 仅支持 queue | interrupt" };
+      }
+      return { ok: true, value: text as "queue" | "interrupt" };
     }
     case "groupAlsoOnReply":
     case "ignoreBotMessages":
@@ -221,8 +234,10 @@ export function formatRuntimeConfig(cfg: RuntimeConfigView, overrides?: RuntimeO
     `streamPrintFrequencyMs: ${cfg.streamPrintFrequencyMs ?? ""}${mark("streamPrintFrequencyMs")}`,
     `streamPrintStep: ${cfg.streamPrintStep ?? ""}${mark("streamPrintStep")}`,
     `streamPushIntervalMs: ${cfg.streamPushIntervalMs ?? ""}${mark("streamPushIntervalMs")}`,
+    `messageDelivery: ${cfg.messageDelivery ?? "queue"}${mark("messageDelivery")}`,
     "",
     "修改: /config <key> <value>",
+    "也可直接发 /delivery 弹卡片切换 messageDelivery",
     "清除: /config clear <key|all>",
     `可改项: ${RUNTIME_CONFIG_KEYS.join(", ")}`,
   ].join("\n");

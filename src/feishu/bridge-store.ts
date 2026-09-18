@@ -18,6 +18,7 @@ export class FeishuBridgeStore {
       chatType: msg.chatType,
       threadMessageId: routeThreadMessageId(msg, previous),
       lastMessageId: msg.messageId,
+      senderOpenId: msg.senderOpenId || previous?.senderOpenId,
       updatedAt: Date.now(),
     };
     state.routes[sessionKey] = route;

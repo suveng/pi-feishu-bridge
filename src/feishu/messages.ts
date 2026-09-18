@@ -10,6 +10,7 @@ export type BotCommand =
   | { name: "workspace"; path?: string }
   | { name: "status" }
   | { name: "commands" }
+  | { name: "delivery" }
   | { name: "config"; key?: string; value?: string; clearTarget?: string };
 
 type PostBody = {
@@ -114,6 +115,7 @@ export function parseBotCommand(text: string): BotCommand | undefined {
   if (normalized === "/stop") return { name: "stop" };
   if (normalized === "/status") return { name: "status" };
   if (normalized === "/commands") return { name: "commands" };
+  if (normalized === "/delivery") return { name: "delivery" };
   const workspaceMatch = trimmed.match(/^\/workspace(?:\s+(.+))?$/s);
   if (workspaceMatch) {
     return { name: "workspace", path: workspaceMatch[1]?.trim() };
@@ -135,6 +137,7 @@ export function parseBotCommand(text: string): BotCommand | undefined {
 
 export function getCommandList(): string {
   return [
+    "【桥接命令】由桥接直接处理",
     "/new — 新建会话",
     "/resume — 恢复历史会话（卡片选择）",
     "/model — 切换模型",
@@ -142,10 +145,17 @@ export function getCommandList(): string {
     "/workspace [path] — 切换工作区",
     "/status — 查看当前模型、思考强度、目录和状态",
     "/stop — 停止当前生成",
+    "/delivery — 设置「正在生成时又收到新消息」怎么处理（排队 / 立即打断，仅私聊）",
     "/config — 查看/修改运行时配置（群触发、流式等）",
     "/config <key> <value> — 设置白名单配置并立即生效",
     "/config clear [key|all] — 清除 runtime overrides",
     "/commands — 显示命令列表",
+    "",
+    "【Pi 流程命令】交回 Pi 执行（仅 Pi runtime，见 .pi/extensions/knowledge-flow）",
+    "/learn [反馈原文] — 把反馈落成 .pi/ 下的规范改动（无参数则复盘本会话）",
+    "/deploy-test [端名] — 测试环境部署（rust_server / quasar / quasar_h5 / quasar-offical-web / senlan-official-web）",
+    "",
+    "【透传给模型】/req、/kb、/test 在飞书里不派发命令处理，斜杠文本原样交给模型——直接说需求即可。",
   ].join("\n");
 }
 

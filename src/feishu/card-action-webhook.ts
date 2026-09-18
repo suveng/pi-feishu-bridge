@@ -47,6 +47,7 @@ export class FeishuCardActionWebhook {
         messageId: action.messageId,
         hasValue: Boolean(action.value),
         value: action.value,
+        hasFormValue: Boolean(action.formValue),
       });
       try {
         const result = await this.onCardAction(action);
@@ -135,5 +136,6 @@ function normalizeCardAction(data: any): FeishuCardAction {
     operatorOpenId,
     token: typeof data?.token === "string" ? data.token : undefined,
     value: data?.action?.value,
+    formValue: data?.action?.form_value,
   };
 }

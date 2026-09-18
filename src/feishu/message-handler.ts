@@ -1,5 +1,5 @@
 import { detectCodeLanguage, decodeTextFile, detectImageMime, type FeishuImageInput, isSupportedImageMime, isSupportedTextFile } from "./attachments.ts";
-import { buildModelCard, buildResumeCard, buildThinkingCard } from "./cards.ts";
+import { buildDeliveryCard, buildModelCard, buildResumeCard, buildThinkingCard } from "./cards.ts";
 import type { ConversationRuntime } from "./runtime.ts";
 import { claimFeishuMessage, markFeishuMessage } from "./dedupe-store.ts";
 import { debugLog } from "./debug.ts";
@@ -43,6 +43,18 @@ export class FeishuMessageHandler {
   async handle(msg: FeishuMessage) {
     const transport = this.getTransport();
     if (!transport) return;
+
+    /**
+     * 本轮结局，finally 里据此把「收到消息」时贴的表情收尾：
+     * done → DONE，failed → CRY，ignored（去重命中 / 空消息）→ 直接摘掉。
+     */
+    let outcome: "done" | "failed" | "ignored" = "ignored";
+    /** 本地包装 markFeishuMessage：顺手记下结局，避免每个出口各写一遍 */
+    const mark = async (status: "replied" | "ignored" | "failed", error?: string) => {
+      if (status === "replied") outcome = "done";
+      else if (status === "failed") outcome = "failed";
+      await markFeishuMessage(msg.messageId, status, error);
+    };
 
     try {
       if (this.seen.has(msg.messageId)) return;
@@ -89,20 +101,20 @@ export class FeishuMessageHandler {
 
       if (!parsed.attachments.length) {
         if (!text && !quoted) {
-          await markFeishuMessage(msg.messageId, "ignored");
+          await mark("ignored");
           return;
         }
         if (text) {
           const handled = await this.handleCommand(msg, key, text);
           if (handled) {
-            await markFeishuMessage(msg.messageId, "replied");
+            await mark("replied");
             return;
           }
         }
       }
 
       if (this.isDuplicateContent(msg, key, text, parsed.attachments)) {
-        await markFeishuMessage(msg.messageId, "ignored");
+        await mark("ignored");
         return;
       }
 
@@ -123,13 +135,13 @@ export class FeishuMessageHandler {
           msg.messageId,
           "当前模型不支持图片解析。请先发送 /model 并切换到支持图片的模型后，再重发图片。",
         );
-        await markFeishuMessage(msg.messageId, "replied");
+        await mark("replied");
         return;
       }
 
       if (downloadErrors.length && !imageInputs.length && !fileSections.length && !text.trim()) {
         await transport.replyText(msg.messageId, `没有可处理的内容：${downloadErrors.join("；")}`);
-        await markFeishuMessage(msg.messageId, "replied");
+        await mark("replied");
         return;
       }
 
@@ -155,12 +167,15 @@ export class FeishuMessageHandler {
         card,
         useStreaming ? (delta) => card.append(delta) : undefined,
       );
-      await markFeishuMessage(msg.messageId, "replied");
+      await mark("replied");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       debugLog("feishu.handler.error", { messageId: msg.messageId, error: message });
-      await markFeishuMessage(msg.messageId, "failed", message);
+      await mark("failed", message);
       await this.getTransport()?.replyText(msg.messageId, `Pi error: ${message}`);
+    } finally {
+      // 任何出口都要收尾，否则「收到」表情会一直贴在消息上
+      await transport.settleReaction(msg.messageId, outcome);
     }
   }
 
@@ -246,6 +261,19 @@ export class FeishuMessageHandler {
           `上下文: ${ctxLine}`,
         ].join("\n"),
       );
+      return true;
+    }
+
+    if (command.name === "delivery") {
+      // 该配置是全局的（runtime-overrides.json），群聊里改会连带影响所有人，所以限私聊
+      if (msg.chatType !== "p2p") {
+        await transport.replyText(
+          msg.messageId,
+          "为避免群聊成员改到所有人的消息处理方式，/delivery 仅支持在与机器人的私聊中使用。",
+        );
+        return true;
+      }
+      await transport.replyCard(msg.messageId, buildDeliveryCard(loadConfig()?.messageDelivery));
       return true;
     }
 

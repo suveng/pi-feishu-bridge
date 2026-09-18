@@ -244,23 +244,31 @@ export class CardKitStream {
       if (this.fullText !== this.lastSent) await this.putContent(this.fullText);
       // 给客户端一点时间把剩余字符打完
       await sleep(Math.max(200, this.printFrequencyMs * 4));
-      const t = await this.getToken();
+      const t = await withRetry(() => this.getToken(), {
+        maxRetries: 3,
+        label: "feishu.cardkit.close_token",
+      });
 
       // 先关 streaming_mode
-      const settingsRes = await fetch(`${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}/settings`, {
-        method: "PATCH",
-        headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          settings: JSON.stringify({
-            config: {
-              streaming_mode: false,
-              summary: { content: (this.fullText.slice(0, 50) || "Pi").replace(/\s+/g, " ") },
-            },
+      // 收尾这一步必须重试：CardKit 卡的 header 还是「回复中」，
+      // 一次 fetch failed 就会让这张卡永远停在「回复中」，只能靠人手动忽略。
+      const settingsRes = await withRetry(() =>
+        fetch(`${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}/settings`, {
+          method: "PATCH",
+          headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            settings: JSON.stringify({
+              config: {
+                streaming_mode: false,
+                summary: { content: (this.fullText.slice(0, 50) || "Pi").replace(/\s+/g, " ") },
+              },
+            }),
+            sequence: ++this.sequence,
+            uuid: `c_${this.cardId}_${this.sequence}`,
           }),
-          sequence: ++this.sequence,
-          uuid: `c_${this.cardId}_${this.sequence}`,
         }),
-      });
+        { maxRetries: 3, label: "feishu.cardkit.close_settings" },
+      );
       if (!settingsRes.ok) {
         debugLog("feishu.cardkit.settings_error", {
           status: settingsRes.status,
@@ -276,18 +284,21 @@ export class CardKitStream {
         runId: this.runId,
         streaming: false,
       });
-      const updateRes = await fetch(`${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          card: {
-            type: "card_json",
-            data: JSON.stringify(finalCard),
-          },
-          sequence: ++this.sequence,
-          uuid: `u_${this.cardId}_${this.sequence}`,
+      const updateRes = await withRetry(() =>
+        fetch(`${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}`, {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            card: {
+              type: "card_json",
+              data: JSON.stringify(finalCard),
+            },
+            sequence: ++this.sequence,
+            uuid: `u_${this.cardId}_${this.sequence}`,
+          }),
         }),
-      });
+        { maxRetries: 3, label: "feishu.cardkit.close_update" },
+      );
       const updateJson = (await updateRes.json().catch(() => ({}))) as CardKitResponse;
       if (!updateRes.ok || (updateJson.code != null && updateJson.code !== 0)) {
         debugLog("feishu.cardkit.full_update_error", {

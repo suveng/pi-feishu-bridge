@@ -36,6 +36,11 @@ function isRetriableError(error: unknown): boolean {
   if (msg.includes("timeout") || msg.includes("rate") || msg.includes("temporarily") || msg.includes("try again")) {
     return true;
   }
+  // Node 内置 fetch 的网络层失败统一报 "fetch failed"，真实原因在 cause 里；
+  // 有 cause 时递归判断 cause，没有 cause 也按可重试处理，避免卡收尾直接放弃。
+  if (msg.includes("fetch failed")) {
+    return true;
+  }
   if (err.cause && err.cause !== error) return isRetriableError(err.cause);
   return false;
 }

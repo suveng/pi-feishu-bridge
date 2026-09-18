@@ -123,6 +123,64 @@ export function buildThinkingCard(key: string, currentModel: RuntimeModel | unde
   };
 }
 
+/**
+ * 「消息投递方式」卡片：正在生成回复时又收到新消息，是排队还是立即打断。
+ * 这是**全局**运行时配置（runtime-overrides.json），卡片只负责查看与切换。
+ */
+export function buildDeliveryCard(current: "queue" | "interrupt" | undefined) {
+  const mode: "queue" | "interrupt" = current === "interrupt" ? "interrupt" : "queue";
+  const elements: any[] = [
+    {
+      tag: "markdown",
+      content: [
+        `当前设置：**${mode === "interrupt" ? "立即打断" : "排队"}**`,
+        "",
+        mode === "interrupt"
+          ? "生成中你发新消息 → 立刻掰掉上一轮，用新消息开新一轮（上一轮已生成的内容留在它自己那张卡上）。"
+          : "生成中你发新消息 → 排在上一轮后面，等它跑完再处理。（新消息的卡片会先出现但暂时空白）",
+        "",
+        "> 这是全局设置，对本地所有飞书会话生效；清除用 `/config clear messageDelivery`。",
+      ].join("\n"),
+    },
+    {
+      tag: "action",
+      actions: [
+        buildDeliveryButton("排队", "queue", mode === "queue"),
+        buildDeliveryButton("立即打断", "interrupt", mode === "interrupt"),
+      ],
+    },
+  ];
+
+  return {
+    config: sharedCardConfig(),
+    header: {
+      template: "orange",
+      title: { tag: "plain_text", content: "消息投递方式" },
+    },
+    elements,
+  };
+}
+
+function buildDeliveryButton(label: string, mode: "queue" | "interrupt", active: boolean) {
+  return {
+    tag: "button",
+    text: { tag: "plain_text", content: label },
+    type: active ? "primary" : "default",
+    value: {
+      action: "pi_feishu_select_delivery",
+      mode,
+    },
+  };
+}
+
+export function parseDeliveryActionValue(value: unknown): { mode: "queue" | "interrupt" } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as any;
+  if (raw.action !== "pi_feishu_select_delivery") return undefined;
+  if (raw.mode !== "queue" && raw.mode !== "interrupt") return undefined;
+  return { mode: raw.mode };
+}
+
 export function buildResumeCard(data: ResumeSessionPage) {
   const elements: any[] = [
     {

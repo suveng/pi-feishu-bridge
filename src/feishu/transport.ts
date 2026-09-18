@@ -9,6 +9,7 @@ import { buildMarkdownCardParts, buildPostMessages, chooseMessageMode } from "./
 import { withRetry } from "./retry.ts";
 import { extractTextFromMsgType } from "./interactive-card.ts";
 import { FeishuCardActionWebhook } from "./card-action-webhook.ts";
+import { autoSyncSlashCommands } from "./slash-commands.ts";
 
 const TEXT_CHUNK_MAX_BYTES = 120 * 1024;
 
@@ -32,6 +33,11 @@ export class FeishuTransport {
   private readonly markdownCopySources = new Map<string, string>();
   private readonly markdownCopySourceOrder: string[] = [];
   private markdownCopySeq = 0;
+  /**
+   * messageId → 本 bot 给这条消息贴上的 reaction_id。
+   * 用于本轮结束时把「收到」的 reaction 换成结果标记（DONE / CRY）。
+   */
+  private readonly pendingReactions = new Map<string, string>();
   private readonly config: FeishuConfig;
   private readonly onMessage: (msg: FeishuMessage) => Promise<void>;
   private readonly onCardAction: (action: FeishuCardAction) => Promise<object | undefined | void>;
@@ -59,6 +65,15 @@ export class FeishuTransport {
     return loadConfig() || this.config;
   }
 
+  /**
+   * 通用飞书 API 调用入口（供 learn-approval 等模块复用已建好的 SDK client）。
+   * 未启动时直接报错：没 client 就调不出结果，静默失败只会更难排。
+   */
+  async requestApi<T = any>(args: { url: string; method: string; params?: unknown; data?: unknown }): Promise<T> {
+    if (!this.sdkClient) throw new Error("飞书连接未启动，无法调用 API");
+    return this.sdkClient.request(args) as Promise<T>;
+  }
+
   async start() {
     if (this.running) return;
     const lark = await import("@larksuiteoapi/node-sdk");
@@ -73,6 +88,10 @@ export class FeishuTransport {
     });
 
     await this.probeBotOpenId();
+
+    // 注册飞书「斜杠指令」：输入框敲 / 可看到命令提示面板。
+    // 后台执行、失败静默降级（缺 application:app_slash_command:write 权限时只记日志）。
+    autoSyncSlashCommands(this.sdkClient, this.config);
 
     const dispatcher = new lark.EventDispatcher({ loggerLevel: lark.LoggerLevel.error }).register({
       "im.message.receive_v1": async (data: unknown) => this.handleRawMessage(data),
@@ -243,6 +262,7 @@ export class FeishuTransport {
       chatId,
       hasToken: Boolean(data?.token),
       value: data?.action?.value,
+      hasFormValue: Boolean(data?.action?.form_value),
     });
     const result = await this.handleCardActionAction({
       messageId,
@@ -250,6 +270,7 @@ export class FeishuTransport {
       operatorOpenId,
       token: typeof data?.token === "string" ? data.token : undefined,
       value: data?.action?.value,
+      formValue: data?.action?.form_value,
     }, "ws");
     // The WSClient sends the return value back to the Feishu platform as
     // the card callback response. It must use the wrapped format:
@@ -322,13 +343,62 @@ export class FeishuTransport {
     }
   }
 
-  private async addReaction(messageId: string, emojiType: string) {
+  /**
+   * 给消息贴表情。
+   * 实测飞书 emoji_type：DONE / CRY 有效，Sad / NO 报 231001 invalid。
+   * @returns 服务端返回的 reaction_id（删除时需要），失败返回 undefined
+   */
+  private async addReaction(messageId: string, emojiType: string): Promise<string | undefined> {
     try {
-      await this.sdkClient.im.messageReaction.create({
+      const res: any = await this.sdkClient.im.messageReaction.create({
         path: { message_id: messageId },
         data: { reaction_type: { emoji_type: emojiType } },
       });
-    } catch {}
+      const reactionId: string | undefined = res?.data?.reaction_id;
+      if (reactionId) {
+        this.pendingReactions.set(messageId, reactionId);
+        // 简单上限保护：长期运行不会无限增长（Map 保持插入顺序）
+        if (this.pendingReactions.size > 2000) {
+          for (const key of [...this.pendingReactions.keys()].slice(0, 500)) {
+            this.pendingReactions.delete(key);
+          }
+        }
+      }
+      return reactionId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 删除本 bot 自己贴的表情（飞书只允许删自己加的） */
+  private async removeReaction(messageId: string, reactionId: string) {
+    try {
+      await this.sdkClient.im.messageReaction.delete({
+        path: { message_id: messageId, reaction_id: reactionId },
+      });
+    } catch {
+      // 表情清理失败不影响主流程
+    }
+  }
+
+  /**
+   * 本轮结束：把收消息时贴的「收到」表情换成结果标记。
+   * - done：换成 DONE
+   * - failed：换成 CRY
+   * - ignored（去重命中 / 空消息）：直接摘掉，不留痕
+   * 由 message-handler 的 finally 统一调用，保证任何出口都会收尾。
+   */
+  async settleReaction(messageId: string, outcome: "done" | "failed" | "ignored") {
+    const pending = this.pendingReactions.get(messageId);
+    if (pending) {
+      this.pendingReactions.delete(messageId);
+      await this.removeReaction(messageId, pending);
+    }
+    const emoji = outcome === "done" ? "DONE" : outcome === "failed" ? "CRY" : undefined;
+    if (emoji) {
+      debugLog("feishu.reaction.settled", { messageId, outcome, emoji });
+      await this.addReaction(messageId, emoji);
+    }
   }
 
   async replyText(messageId: string, text: string) {

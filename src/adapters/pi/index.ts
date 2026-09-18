@@ -6,6 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { BRIDGE_PI_PATH, CHILD_SESSION_ENV, CONFIG_PI_PATH, DAEMON_LOG_PATH, DEBUG_PI_LOG_PATH, DEDUPE_PI_PATH, ensureRoot, loadConfig, mask, removePath, PI_SOURCE, setRuntimeSource, STATE_PI_PATH, writeJson } from "../../feishu/config.ts";
 import { debugLog } from "../../feishu/debug.ts";
+import { FEISHU_UI_NOTIFY_EVENT, setFeishuUiNotifySink, type FeishuUiNotifyPayload } from "../../feishu/ui-notify.ts";
 import { FeishuBridgeRuntime } from "../../feishu/bridge-runtime.ts";
 import { FeishuBridgeStore } from "../../feishu/bridge-store.ts";
 import { FeishuDelivery } from "../../feishu/delivery.ts";
@@ -22,6 +23,7 @@ import {
 import { BotUnavailableError, FeishuTransport } from "../../feishu/transport.ts";
 import type { FeishuConfig, FeishuStatus } from "../../feishu/types.ts";
 import { createCardActionHandler } from "../../feishu/card-actions.ts";
+import { LearnApprovalClient, type LearnApprovalResult } from "../../feishu/learn-approval.ts";
 import { PiConversationRuntime, handlePiMessageEnd } from "./PiConversationRuntime.ts";
 
 /**
@@ -57,6 +59,59 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     promptTimeoutSec: initialConfig?.promptTimeoutSec,
   });
   const messageHandler = new FeishuMessageHandler(conversations, () => transport, bridgeStore);
+
+  // 扩展 UI 输出回传：knowledge-flow 等 Pi 扩展的 ctx.ui.notify 走这里回到飞书会话。
+  // 以进程级 sink 为准：每个飞书会话各自的 DefaultResourceLoader 有独立的 pi.events 总线，
+  // 而 notify 发生在会话内的扩展实例上（详见 ui-notify.ts 的说明）。
+  setFeishuUiNotifySink((payload) => conversations.pushUiNotify(payload));
+  // 选择题卡片发送器：模型调 feishu_ask 时，把卡片回复到该会话最近一条消息上
+  conversations.setAskSender(async (key, card) => {
+    const activeTransport = transport;
+    if (!activeTransport) throw new Error("飞书连接未启动");
+    const route = bridgeStore.getRoute(key);
+    if (!route?.lastMessageId) throw new Error("找不到该会话最近的消息");
+    // 返回卡片消息 ID：超时后要拿它 patch 同一张卡
+    return activeTransport.replyCard(route.lastMessageId, card);
+  });
+  // 超时后把提问卡片原地刷成「已超时」，避免留一张还能点、点了没反应的僵尸卡
+  conversations.setAskCardUpdater(async (messageId, card) => {
+    const activeTransport = transport;
+    if (!activeTransport) throw new Error("飞书连接未启动");
+    await activeTransport.updateCard(messageId, card);
+  });
+  // 进化审批：把 /learn 的落地变成一道必须过的飞书审批。
+  // 审批单的审批人、表单结构在飞书审批定义里；这里只负责拿发起人 → 建实例 → 等结果。
+  conversations.setLearnApprovalRequester(async (key, body): Promise<LearnApprovalResult> => {
+    const activeTransport = transport;
+    if (!activeTransport) throw new Error("飞书连接未启动，无法发起审批");
+    const cfg = loadConfig();
+    const approval = cfg?.learnApproval;
+    if (!approval) {
+      throw new Error(
+        "未配置进化审批：请在飞书审批后台建一个带「多行文本」控件的审批，"
+        + "再把它的 approval_code 写进 ~/.pi/agent/feishu/config.pi.json 的 learnApproval.approvalCode",
+      );
+    }
+    // 发起人取自该会话最近一条消息的发送者：审批单里要显示是谁要进化
+    const senderOpenId = bridgeStore.getRoute(key)?.senderOpenId;
+    if (!senderOpenId) throw new Error("拿不到该会话的发送人 open_id，无法发起审批");
+    const client = new LearnApprovalClient({
+      api: { request: (args) => activeTransport.requestApi(args) },
+      config: approval,
+      log: (event, data) => debugLog(event, (data ?? {}) as Record<string, unknown>),
+    });
+    return client.request({ body, applicantOpenId: senderOpenId });
+  });
+  // 事件总线仅作为同总线场景（扩展与桥接在同一 loader 下）的补充
+  try {
+    (pi as any).events?.on?.(FEISHU_UI_NOTIFY_EVENT, (payload: FeishuUiNotifyPayload) => {
+      conversations.pushUiNotify(payload);
+    });
+  } catch (error) {
+    debugLog("feishu.ui.notify_bridge_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   const STATUS_KEY = "feishu-connection";
   const STATUS_REFRESH_MS = 2_000;
@@ -562,12 +617,16 @@ function listProcesses() {
 }
 
 function looksLikeFeishuDaemon(command: string, extensionPath?: string) {
-  const hasDaemonFlags = command.includes("--mode rpc")
-    && command.includes("--no-extensions")
-    && command.includes("--no-builtin-tools");
+  // 启动命令经 quoteShell 处理，每个参数单独加引号（'--mode' 'rpc' '--no-extensions'），
+  // 直接匹配 "--mode rpc" 永远失败 —— 那样残留的 daemon 空壳（bash + tail 喂 stdin）
+  // 永远不会被 reap 掉。所以先去引号再匹配。
+  const normalized = command.replace(/'/g, "");
+  const hasDaemonFlags = normalized.includes("--mode rpc")
+    && normalized.includes("--no-extensions")
+    && normalized.includes("--no-builtin-tools");
   if (!hasDaemonFlags) return false;
-  if (extensionPath) return command.includes(extensionPath);
-  return command.includes("feishu/index.ts");
+  if (extensionPath) return normalized.includes(extensionPath);
+  return normalized.includes("feishu/index.ts");
 }
 
 function terminateLauncherParent() {
