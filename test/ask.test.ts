@@ -197,14 +197,26 @@ test("buildAskCard：已答过的问题不再给按钮（防重复提交）", ()
   assert.equal(actionRows[0].actions[0].value.questionIndex, 1);
 });
 
-test("buildAskCard：同轮第二次提问复用同一张卡，旧问题以删除线保留在顶部", () => {
+test("buildAskCard：同轮第二次提问复用同一张卡，已答旧问题单独成块且新问题编号接续", () => {
   const card = buildAskCard("ask_2", twoQuestions(), [undefined, undefined], "pending", [
     { question: "先做哪个？", chosen: "推进开发" },
   ]);
   const text = cardText(card);
-  assert.match(text, /先做哪个？/, "答过的旧问题不能凭空消失");
-  assert.match(text, /推进开发/);
-  assert.match(text, /~~先做哪个？~~/, "旧问题用删除线标成已答");
+  assert.match(text, /已答：/, "已答部分要有明确标题，不能和待答问题混在一起");
+  assert.match(text, /1\. 先做哪个？ → 推进开发/, "旧问题带着自己的编号与答案");
+  assert.match(text, /\*\*2\. 先做哪个？\*\*/, "新问题接着旧编号往下数，不能再从 1 开始");
+  // 按钮回调用的是 0 基 questionIndex，与展示编号无关
+  const actionRows = (card.elements as any[]).filter((element) => element.tag === "action");
+  assert.equal(actionRows[0].actions[0].value.questionIndex, 0);
+});
+
+test("buildAskCard：已答记录超过上限时编号不跳号", () => {
+  const history = [1, 2, 3, 4, 5].map((n) => ({ question: `旧问题${n}`, chosen: `答案${n}` }));
+  const card = buildAskCard("ask_9", twoQuestions(), [undefined, undefined], "pending", history);
+  const text = cardText(card);
+  assert.equal(text.includes("旧问题1"), false, "只展示最近几条");
+  assert.match(text, /4\. 旧问题4 → 答案4/, "展示的条目仍用真实序号");
+  assert.match(text, /6\. 先做哪个？/, "新问题接在 5 之后，不跳号");
 });
 
 test("cancelAskBySession：只取消该会话的提问，并标记 canceled", () => {

@@ -115,6 +115,9 @@ function truncateLabel(label: string) {
   return text.length > BUTTON_LABEL_MAX ? `${text.slice(0, BUTTON_LABEL_MAX - 1)}…` : text;
 }
 
+/** 一张选择题卡上最多展示几条已答记录（编号仍按真实序号，不跳号） */
+const HISTORY_MAX = 4;
+
 export function buildAskCard(
   askId: string,
   questions: AskQuestion[],
@@ -124,21 +127,23 @@ export function buildAskCard(
 ) {
   const elements: any[] = [];
 
-  // 同一轮里第 2 次提问会复用同一张卡，先在上面列出已经答过的旧问题
+  // 同一轮里第 2 次提问会复用同一张卡：已答的旧问题单独成块列在上面，
+  // 新问题接着旧编号往下编（否则第 2 题又写成「1.」，看起来像顺序错乱）
   if (history.length) {
-    elements.push({
-      tag: "markdown",
-      content: history
-        .slice(-3)
-        .map((entry) => `~~${entry.question}~~ → ${entry.chosen ?? "（未选）"}`)
-        .join("\n"),
-    });
+    const shown = history.slice(-HISTORY_MAX);
+    const offset = history.length - shown.length;
+    const lines = shown.map(
+      (entry, index) => `${offset + index + 1}. ${entry.question} → ${entry.chosen ?? "（未选）"}`,
+    );
+    elements.push({ tag: "markdown", content: `**已答：**\n${lines.join("\n")}` });
     elements.push({ tag: "hr" });
   }
 
   questions.forEach((question, questionIndex) => {
     const chosen = answers[questionIndex];
-    const lines: string[] = [`**${questionIndex + 1}. ${question.question}**`];
+    // 展示编号接着已答记录往下数；按钮回调用的是 questionIndex（0 基），与展示无关
+    const displayNumber = history.length + questionIndex + 1;
+    const lines: string[] = [`**${displayNumber}. ${question.question}**`];
     question.options.forEach((option, optionIndex) => {
       const desc = option.description ? ` — ${option.description}` : "";
       const mark = chosen === option.label ? " ✅" : "";
