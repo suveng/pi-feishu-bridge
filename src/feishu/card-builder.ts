@@ -1,9 +1,20 @@
 /** 单卡 UI 纯函数：构建飞书 interactive / CardKit 卡片 JSON（无 IO） */
-export type ReplyCardStatus = "running" | "done" | "failed" | "stopped" | "inactive";
+/**
+ * 卡片状态。
+ * - running：正在流式回复
+ * - paused：已定格、等用户在选择题卡片上作答（feishu_ask 等待期间）
+ * - answered：用户已作答，这张卡已「翻页」，后续内容在新的一张卡上
+ * - done/failed/stopped/inactive：终态
+ */
+export type ReplyCardStatus = "running" | "paused" | "answered" | "done" | "failed" | "stopped" | "inactive";
+
+/** 只能作为终态写入的状态（paused 是中间态，不能被 finish 成 paused） */
+export type ReplyCardFinalStatus = "done" | "failed" | "stopped";
 
 export const STOP_ACTION = "pi_feishu_stop_task";
 const MAX_NOTE_CHARS = 96;
 const WAITING_TEXT = "正在回复…";
+const PAUSED_TEXT = "（已暂停，等你在选择题卡片上作答）";
 
 /** CardKit JSON 2.0 停止按钮（直接放在 elements 里，不用 1.0 的 action 模块） */
 export function buildStopButton(key: string, runId?: string) {
@@ -32,22 +43,29 @@ export function buildCardKitCardJson(input: {
   key?: string;
   runId?: string;
   note?: string;
+  /** 覆盖默认标题；续段用「回复（接上条）」交代上下文 */
+  title?: string;
   streaming?: boolean;
   printFrequencyMs?: number;
   printStep?: number;
 }) {
   const running = input.status === "running";
+  // 暂停等选择时必须保留停止按钮：否则用户只能干等 10 分钟超时，无法中止这一轮
+  const showStop = running || input.status === "paused";
   const body = (input.body || "").trim();
   const note = input.note ? normalizeNote(input.note) : undefined;
   const elements: object[] = [];
 
-  if (running) {
+  if (running || input.status === "paused") {
+    const parts: string[] = [];
+    if (note) parts.push(note);
+    parts.push(body || (running ? WAITING_TEXT : PAUSED_TEXT));
     elements.push({
       tag: "markdown",
-      content: body || WAITING_TEXT,
+      content: parts.join("\n\n"),
       element_id: "content",
     });
-    if (input.key) {
+    if (showStop && input.key) {
       elements.push(buildStopButton(input.key, input.runId));
     }
   } else if (input.status === "done") {
@@ -84,7 +102,7 @@ export function buildCardKitCardJson(input: {
     config,
     header: {
       template: headerTemplate(input.status),
-      title: { tag: "plain_text", content: titleForStatus(input.status) },
+      title: { tag: "plain_text", content: input.title || titleForStatus(input.status) },
     },
     body: { elements },
   };
@@ -102,29 +120,39 @@ export function buildReplyCard(input: {
   note?: string;
   body?: string;
   runId?: string;
+  title?: string;
 }) {
   const running = input.status === "running";
+  const showStop = running || input.status === "paused";
   const body = (input.body || "").trim();
   const note = input.note ? normalizeNote(input.note) : undefined;
   const elements: object[] = [];
 
-  if (running) {
+  if (running || input.status === "paused") {
+    if (note) {
+      elements.push({
+        tag: "div",
+        text: { tag: "lark_md", content: note },
+      });
+    }
     elements.push({
       tag: "div",
-      text: { tag: "lark_md", content: body || WAITING_TEXT },
+      text: { tag: "lark_md", content: body || (running ? WAITING_TEXT : PAUSED_TEXT) },
     });
     // 1.0 interactive 仍可用 action 模块；同时附带 2.0 button 以兼容
-    elements.push({
-      tag: "action",
-      actions: [
-        {
-          tag: "button",
-          text: { tag: "plain_text", content: "停止" },
-          type: "danger",
-          value: { action: STOP_ACTION, key: input.key, runId: input.runId },
-        },
-      ],
-    });
+    if (showStop) {
+      elements.push({
+        tag: "action",
+        actions: [
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "停止" },
+            type: "danger",
+            value: { action: STOP_ACTION, key: input.key, runId: input.runId },
+          },
+        ],
+      });
+    }
   } else if (input.status === "done") {
     elements.push({
       tag: "div",
@@ -159,7 +187,7 @@ export function buildReplyCard(input: {
     },
     header: {
       template: headerTemplate(input.status),
-      title: { tag: "plain_text", content: titleForStatus(input.status) },
+      title: { tag: "plain_text", content: input.title || titleForStatus(input.status) },
     },
     elements,
   };
@@ -186,6 +214,8 @@ function titleForStatus(status: ReplyCardStatus) {
   if (status === "failed") return "出错了";
   if (status === "stopped") return "已停止";
   if (status === "inactive") return "已结束";
+  if (status === "paused") return "等你选择";
+  if (status === "answered") return "已选择";
   return "回复中";
 }
 
@@ -194,10 +224,12 @@ function headerTemplate(status: ReplyCardStatus) {
   if (status === "failed") return "red";
   if (status === "stopped") return "grey";
   if (status === "inactive") return "grey";
+  if (status === "answered") return "grey";
+  if (status === "paused") return "orange";
   return "blue";
 }
 
-export function defaultFinalNote(status: Exclude<ReplyCardStatus, "running" | "inactive">): string | undefined {
+export function defaultFinalNote(status: ReplyCardFinalStatus): string | undefined {
   if (status === "done") return undefined;
   if (status === "failed") return "处理失败";
   return "已停止";

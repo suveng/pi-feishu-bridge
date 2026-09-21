@@ -36,6 +36,22 @@ export type AskOutcome = {
   answers: AskAnswer[];
   /** true = 等超时了，answers 里可能有未作答项 */
   timedOut: boolean;
+  /**
+   * true = 本次提问被主动取消（停止按钮 / 新一轮打断）。
+   * 此时整轮已经作废，调用方不能再去「开新段继续写」。
+   */
+  canceled?: boolean;
+  /**
+   * true = 选择题卡片根本没发出去（飞书接口报错/读超时）。
+   * 绝不能当成「用户没选」：用户根本没看到这道题。
+   */
+  sendFailed?: boolean;
+};
+
+/** 图上已经答完的旧问题，附到下一张选择题卡顶部，别让答过的内容凭空消失 */
+export type AskHistoryEntry = {
+  question: string;
+  chosen?: string;
 };
 
 type AskRecord = {
@@ -104,8 +120,21 @@ export function buildAskCard(
   questions: AskQuestion[],
   answers: (string | undefined)[],
   status: "pending" | "done" | "timeout" | "canceled" = "pending",
+  history: AskHistoryEntry[] = [],
 ) {
   const elements: any[] = [];
+
+  // 同一轮里第 2 次提问会复用同一张卡，先在上面列出已经答过的旧问题
+  if (history.length) {
+    elements.push({
+      tag: "markdown",
+      content: history
+        .slice(-3)
+        .map((entry) => `~~${entry.question}~~ → ${entry.chosen ?? "（未选）"}`)
+        .join("\n"),
+    });
+    elements.push({ tag: "hr" });
+  }
 
   questions.forEach((question, questionIndex) => {
     const chosen = answers[questionIndex];
@@ -231,7 +260,7 @@ export function registerAsk(
         error: error instanceof Error ? error.message : String(error),
       });
     }
-    current.resolve(toOutcome(current, true));
+    current.resolve(toOutcome(current, { timedOut: true }));
   }, ASK_TIMEOUT_MS);
   // 定时器不该拖住进程退出
   record.timer.unref?.();
@@ -300,7 +329,7 @@ export function answerAsk(
     if (record.timer) clearTimeout(record.timer);
     rememberSettled(record, "done");
     debugLog("feishu.ask.answered", { askId, key: record.key, label: value, custom: allowCustom, allAnswered: true });
-    record.resolve(toOutcome(record, false));
+    record.resolve(toOutcome(record));
   } else {
     debugLog("feishu.ask.partial", {
       askId,
@@ -321,12 +350,49 @@ export function cancelAsk(askId: string, timedOut = false) {
   pendingAsks.delete(askId);
   if (record.timer) clearTimeout(record.timer);
   rememberSettled(record, timedOut ? "timeout" : "canceled");
-  record.resolve(toOutcome(record, timedOut));
+  record.resolve(toOutcome(record, timedOut ? { timedOut: true } : { canceled: true }));
 }
 
-function toOutcome(record: AskRecord, timedOut: boolean): AskOutcome {
+/**
+ * 提问卡片发送失败。
+ *
+ * 与 cancelAsk 的区别很重要：cancelAsk 是「用户没来得及答」，这里是「用户压根没收到」。
+ * 不分开的话模型会把「未选择」当成用户的决定，接着按默认值往下答（表现为「秒超时」）。
+ */
+export function failAsk(askId: string) {
+  const record = pendingAsks.get(askId);
+  if (!record) return;
+  pendingAsks.delete(askId);
+  if (record.timer) clearTimeout(record.timer);
+  rememberSettled(record, "canceled");
+  record.resolve(toOutcome(record, { sendFailed: true }));
+}
+
+/**
+ * 取消某个会话里所有待答提问（停止按钮 / 被新消息打断）。
+ * 返回被取消的记录（含 cardMessageId），调用方拿它把卡片刷成「提问已结束」。
+ *
+ * 为什么要主动取消：`session.abort()` 不会解除 `feishu_ask` 的等待，那个 Promise
+ * 会一直挂到 10 分钟超时，期间整轮无法真正收尾。
+ */
+export function cancelAskBySession(key: string, timedOut = false): AskRecord[] {
+  const canceled: AskRecord[] = [];
+  for (const [askId, record] of [...pendingAsks]) {
+    if (record.key !== key) continue;
+    cancelAsk(askId, timedOut);
+    canceled.push(record);
+  }
+  return canceled;
+}
+
+function toOutcome(
+  record: AskRecord,
+  flags: { timedOut?: boolean; canceled?: boolean; sendFailed?: boolean } = {},
+): AskOutcome {
   return {
-    timedOut,
+    timedOut: Boolean(flags.timedOut),
+    ...(flags.canceled ? { canceled: true } : {}),
+    ...(flags.sendFailed ? { sendFailed: true } : {}),
     answers: record.questions.map((question, index) => ({
       header: question.header,
       question: question.question,

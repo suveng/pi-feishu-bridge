@@ -97,3 +97,36 @@ test("regression: streaming running card without key must not silently drop stop
   assert.equal(hasStopControl(withKey), true);
   assert.equal(hasStopControl(withoutKey), false);
 });
+
+test("CardKit paused card keeps the stop button and reports 等你选择", () => {
+  const card = buildCardKitCardJson({
+    status: "paused",
+    body: "前半段",
+    note: "等你选择",
+    key: "p2p:user",
+    runId: "run-1",
+    streaming: false,
+  }) as any;
+  assert.equal(headerTitle(card), "等你选择");
+  assert.equal(card.config.streaming_mode, false, "暂停时必须关掉流式，否则卡还在涨字");
+  assert.equal(hasStopControl(card), true, "暂停期间用户还得能中止这一轮");
+  assert.match(JSON.stringify(card), /前半段/);
+
+  const interactive = buildReplyCard({ key: "k", status: "paused", body: "前半段", note: "等你选择" });
+  assert.equal(headerTitle(interactive), "等你选择");
+  assert.equal(hasStopControl(interactive), true);
+});
+
+test("CardKit answered card is grey and drops the stop button", () => {
+  const card = buildCardKitCardJson({ status: "answered", body: "前半段", key: "k" }) as any;
+  assert.equal(headerTitle(card), "已选择");
+  assert.equal(card.header.template, "grey");
+  assert.equal(hasStopControl(card), false);
+});
+
+test("continuation card can override the default header title", () => {
+  const running = buildCardKitCardJson({ status: "running", key: "k", title: "回复（接上条）", streaming: true }) as any;
+  assert.equal(headerTitle(running), "回复（接上条）");
+  const done = buildReplyCard({ key: "k", status: "done", body: "x", title: "回复（接上条）" });
+  assert.equal(headerTitle(done), "回复（接上条）");
+});

@@ -11,6 +11,9 @@ import {
   answerAsk,
   buildAskCard,
   cancelAsk,
+  cancelAskBySession,
+  failAsk,
+  getAsk,
   registerAsk,
   setAskCardMessage,
   type AskQuestion,
@@ -192,4 +195,63 @@ test("buildAskCard：已答过的问题不再给按钮（防重复提交）", ()
   const actionRows = (card.elements as any[]).filter((element) => element.tag === "action");
   assert.equal(actionRows.length, 1, "只该剩第二题的按钮行");
   assert.equal(actionRows[0].actions[0].value.questionIndex, 1);
+});
+
+test("buildAskCard：同轮第二次提问复用同一张卡，旧问题以删除线保留在顶部", () => {
+  const card = buildAskCard("ask_2", twoQuestions(), [undefined, undefined], "pending", [
+    { question: "先做哪个？", chosen: "推进开发" },
+  ]);
+  const text = cardText(card);
+  assert.match(text, /先做哪个？/, "答过的旧问题不能凭空消失");
+  assert.match(text, /推进开发/);
+  assert.match(text, /~~先做哪个？~~/, "旧问题用删除线标成已答");
+});
+
+test("cancelAskBySession：只取消该会话的提问，并标记 canceled", () => {
+  let outcomeA: any;
+  let outcomeB: any;
+  const recordA = registerAsk("group:a", twoQuestions(), (value) => {
+    outcomeA = value;
+  });
+  const recordB = registerAsk("group:b", twoQuestions(), (value) => {
+    outcomeB = value;
+  });
+
+  const canceled = cancelAskBySession("group:a");
+  assert.equal(canceled.length, 1, "只该取消 group:a 的那一条");
+  assert.equal(canceled[0].askId, recordA.askId);
+  assert.equal(outcomeA.canceled, true, "被取消的提问必须带 canceled 标记（调用方据此不开新卡）");
+  assert.equal(outcomeA.timedOut, false);
+  assert.equal(outcomeB, undefined, "别的会话不受影响");
+
+  cancelAsk(recordB.askId);
+  assert.equal(outcomeB.canceled, true);
+});
+
+test("正常作答不带 canceled 标记（否则整轮会被当成已作废）", () => {
+  let outcome: any;
+  const record = registerAsk("group:test", twoQuestions(), (value) => {
+    outcome = value;
+  });
+  answerAsk(record.askId, 0, "推进开发");
+  answerAsk(record.askId, 1, "全量推进");
+  assert.equal(outcome.canceled, undefined);
+  assert.equal(outcome.timedOut, false);
+});
+
+test("卡片发送失败走 sendFailed，不能报成「用户没选」", () => {
+  let outcome: any;
+  const record = registerAsk("group:test", twoQuestions(), (value) => {
+    outcome = value;
+  });
+  setAskCardMessage(record.askId, "om_card_1");
+
+  failAsk(record.askId);
+
+  assert.equal(outcome.sendFailed, true, "发送失败必须单独标记，否则模型会把未选择当成用户的决定");
+  assert.equal(outcome.canceled, undefined);
+  assert.equal(outcome.timedOut, false);
+  assert.equal(outcome.answers.every((answer: any) => answer.chosen === undefined), true);
+  // 卡片没发出去，不能在超时/取消路径上再刷一张不存在的卡
+  assert.equal(getAsk(record.askId), undefined, "已结算的提问不能再被点击影响");
 });

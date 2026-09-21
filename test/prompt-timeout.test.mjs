@@ -116,3 +116,30 @@ test("a real prompt error propagates untouched", async () => {
     /real-model-error/,
   );
 });
+
+test("等用户作答（feishu_ask）期间硬超时顺延，不会误杀整轮", async (t) => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => mock.timers.reset());
+
+  const d = deferred();
+  let hardCalls = 0;
+  let paused = true;
+  const run = waitForPrompt(d.promise, {
+    notifyMs: 0,
+    hardMs: 1000,
+    hardTimeoutMessage: "timeout-while-paused",
+    onHardTimeout: () => {
+      hardCalls += 1;
+    },
+    isPaused: () => paused,
+  });
+
+  mock.timers.tick(1000);
+  await Promise.resolve();
+  assert.equal(hardCalls, 0, "等用户作答时不能触发硬超时");
+
+  paused = false;
+  mock.timers.tick(1000);
+  await assert.rejects(run, /timeout-while-paused/);
+  assert.equal(hardCalls, 1);
+});

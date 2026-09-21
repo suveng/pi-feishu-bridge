@@ -11,7 +11,7 @@ import {
   setRuntimeConfig,
 } from "./runtime-config.ts";
 import { conversationKey, conversationLabel, buildPromptWithQuote, getCommandList, normalizeForDedupe, parseBotCommand, parseMessageInput, pruneRecentMap } from "./messages.ts";
-import { ReplyCard } from "./reply-card.ts";
+import { ReplyCard, resolveCardTarget } from "./reply-card.ts";
 import type { FeishuBridgeStore } from "./bridge-store.ts";
 import type { FeishuTransport } from "./transport.ts";
 import type { FeishuMessage } from "./types.ts";
@@ -149,7 +149,14 @@ export class FeishuMessageHandler {
       const prompt = buildPromptWithQuote(basePrompt, quoted);
       // 单卡：全程 header；流式参数来自 config/env
       const useStreaming = cfg?.streamingReply !== false;
-      const card = new ReplyCard(key, msg.messageId, transport, {
+      // 发到哪里由 resolveCardTarget 统一决定：普通会话平铺，话题群才 reply
+      const route = this.bridgeStore?.getRoute(key) ?? {
+        chatId: msg.chatId,
+        chatType: msg.chatType,
+        lastMessageId: msg.messageId,
+        threadMessageId: msg.threadId || msg.rootId || msg.parentId,
+      };
+      const card = new ReplyCard(key, resolveCardTarget(route), transport, {
         enabled: useStreaming,
         printFrequencyMs: cfg?.streamPrintFrequencyMs,
         printStep: cfg?.streamPrintStep,

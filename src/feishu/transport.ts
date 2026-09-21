@@ -553,10 +553,33 @@ export class FeishuTransport {
 
   async replyCard(messageId: string, card: object) {
     debugLog("feishu.reply.card", { messageId });
-    const res = await this.sdkClient.im.message.reply({
+    // 必须带重试：一次 read ETIMEDOUT 就让选择题卡片发不出去，
+    // 上游会把它当成「用户没作答」，模型接着往下答（看起来像秒超时）。
+    const res = await this.apiCall("feishu.reply.card", () => this.sdkClient.im.message.reply({
       path: { message_id: messageId },
       data: { msg_type: "interactive", content: JSON.stringify(card) },
-    });
+    }));
+    const id = res?.data?.message_id as string | undefined;
+    this.rememberBotOutboundMessageId(id);
+    return id;
+  }
+
+  /**
+   * 平铺发送一张卡片（不挂到回复链上）。
+   *
+   * 回归背景：一輪里的回答卡与选择题卡如果都 reply 同一条用户消息，飞书会把它们
+   * 归成同一个回复簇，主聊天流只留最后一条预览，先到的那张看起来被「刷掉」了。
+   */
+  async createCard(chatId: string, card: object): Promise<string | undefined> {
+    debugLog("feishu.send.card", { chatId });
+    const res = await this.apiCall("feishu.send.card", () => this.sdkClient.im.message.create({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: chatId,
+        msg_type: "interactive",
+        content: JSON.stringify(card),
+      },
+    }));
     const id = res?.data?.message_id as string | undefined;
     this.rememberBotOutboundMessageId(id);
     return id;

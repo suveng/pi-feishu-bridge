@@ -24,6 +24,7 @@ import { BotUnavailableError, FeishuTransport } from "../../feishu/transport.ts"
 import type { FeishuConfig, FeishuStatus } from "../../feishu/types.ts";
 import { createCardActionHandler } from "../../feishu/card-actions.ts";
 import { LearnApprovalClient } from "../../feishu/learn-approval.ts";
+import { resolveCardTarget } from "../../feishu/reply-card.ts";
 import { PiConversationRuntime, handlePiMessageEnd } from "./PiConversationRuntime.ts";
 
 /**
@@ -64,13 +65,18 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   // 以进程级 sink 为准：每个飞书会话各自的 DefaultResourceLoader 有独立的 pi.events 总线，
   // 而 notify 发生在会话内的扩展实例上（详见 ui-notify.ts 的说明）。
   setFeishuUiNotifySink((payload) => conversations.pushUiNotify(payload));
-  // 选择题卡片发送器：模型调 feishu_ask 时，把卡片回复到该会话最近一条消息上
+  // 选择题卡片发送器：模型调 feishu_ask 时，把卡片发到该会话。
+  // 走 resolveCardTarget：普通会话平铺（避免与回答卡归成同一个回复簇、把先到的卡挤掉），
+  // 话题群/回复链必须 reply（create 会另开一个话题）。
   conversations.setAskSender(async (key, card) => {
     const activeTransport = transport;
     if (!activeTransport) throw new Error("飞书连接未启动");
     const route = bridgeStore.getRoute(key);
-    if (!route?.lastMessageId) throw new Error("找不到该会话最近的消息");
+    if (!route) throw new Error("找不到该会话的路由");
+    const target = resolveCardTarget(route);
     // 返回卡片消息 ID：超时后要拿它 patch 同一张卡
+    if ("chatId" in target && target.chatId) return activeTransport.createCard(target.chatId, card);
+    if (!route.lastMessageId) throw new Error("找不到该会话最近的消息");
     return activeTransport.replyCard(route.lastMessageId, card);
   });
   // 超时后把提问卡片原地刷成「已超时」，避免留一张还能点、点了没反应的僵尸卡

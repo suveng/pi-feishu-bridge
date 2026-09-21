@@ -4,11 +4,24 @@
  * 我们侧只需定期 PUT 完整 markdown 内容。
  * running 卡必须带「停止」按钮（与 card-builder 契约一致）。
  */
-import { buildCardKitCardJson } from "./card-builder.ts";
+import { buildCardKitCardJson, type ReplyCardStatus } from "./card-builder.ts";
 import { debugLog } from "./debug.ts";
 import { withRetry } from "./retry.ts";
 
 type CardKitResponse = { code: number; msg: string; data?: any };
+
+/**
+ * 卡片发到哪里：
+ * - chatId：平铺成一条新消息（默认；多条 reply 会被飞书折叠成同一个回复簇，后到的盖住先到的）
+ * - replyToMessageId：回复某条消息（话题群/回复链必须用这个，否则会新开话题）
+ */
+export type CardKitTarget = { chatId: string } | { replyToMessageId: string };
+
+/** CardKit 卡片可写入的状态（paused/answered 是中间态，允许重复全量更新） */
+export type CardKitCardStatus = Extract<
+  ReplyCardStatus,
+  "running" | "paused" | "answered" | "done" | "stopped" | "failed"
+>;
 
 export type CardKitStreamOptions = {
   /** 客户端打印频率 ms（默认 50，越小越跟手） */
@@ -21,6 +34,10 @@ export type CardKitStreamOptions = {
   conversationKey?: string;
   /** 本轮 runId，用于停止按钮回调 */
   runId?: string;
+  /** 覆盖卡片默认标题（续段用「回复（接上条）」） */
+  title?: string;
+  /** 卡片正文上方的说明（续段用来交代「承接上一条回复」） */
+  note?: string;
   /** 记录本 bot 发出的消息 id（供 groupAlsoOnReply） */
   onOutboundMessageId?: (messageId: string) => void;
 };
@@ -41,31 +58,35 @@ export class CardKitStream {
   private readonly pushIntervalMs: number;
   private readonly conversationKey?: string;
   private readonly runId?: string;
+  private readonly title?: string;
+  private readonly note?: string;
   private readonly onOutboundMessageId?: (messageId: string) => void;
   private readonly appId: string;
   private readonly appSecret: string;
   private readonly domain: "feishu" | "lark";
-  private readonly replyToMessageId: string;
+  private readonly target: CardKitTarget;
   private readonly fallbackReply: (text: string) => Promise<void>;
 
   constructor(
     appId: string,
     appSecret: string,
     domain: "feishu" | "lark",
-    replyToMessageId: string,
+    target: string | CardKitTarget,
     fallbackReply: (text: string) => Promise<void>,
     options?: CardKitStreamOptions,
   ) {
     this.appId = appId;
     this.appSecret = appSecret;
     this.domain = domain;
-    this.replyToMessageId = replyToMessageId;
+    this.target = typeof target === "string" ? { replyToMessageId: target } : target;
     this.fallbackReply = fallbackReply;
     this.printFrequencyMs = Math.max(20, options?.printFrequencyMs ?? 50);
     this.printStep = Math.max(1, options?.printStep ?? 1);
     this.pushIntervalMs = Math.max(50, options?.pushIntervalMs ?? 120);
     this.conversationKey = options?.conversationKey;
     this.runId = options?.runId;
+    this.title = options?.title;
+    this.note = options?.note;
     this.onOutboundMessageId = options?.onOutboundMessageId;
   }
 
@@ -97,6 +118,8 @@ export class CardKitStream {
         body: "",
         key: this.conversationKey,
         runId: this.runId,
+        title: this.title,
+        note: this.note,
         streaming: true,
         printFrequencyMs: this.printFrequencyMs,
         printStep: this.printStep,
@@ -113,23 +136,30 @@ export class CardKitStream {
       }
       this.cardId = c.data.card_id as string;
 
-      const sr = await fetch(`${this.baseUrl()}/open-apis/im/v1/messages/${this.replyToMessageId}/reply`, {
+      // 平铺（create）还是回复（reply）：多条 reply 会被飞书折叠，见 CardKitTarget 说明
+      const isCreate = "chatId" in this.target;
+      const sendUrl = isCreate
+        ? `${this.baseUrl()}/open-apis/im/v1/messages?receive_id_type=chat_id`
+        : `${this.baseUrl()}/open-apis/im/v1/messages/${(this.target as { replyToMessageId: string }).replyToMessageId}/reply`;
+      const sr = await fetch(sendUrl, {
         method: "POST",
         headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...(isCreate ? { receive_id: (this.target as { chatId: string }).chatId } : {}),
           msg_type: "interactive",
           content: JSON.stringify({ type: "card", data: { card_id: this.cardId } }),
         }),
       });
       const s = (await sr.json()) as CardKitResponse & { data?: { message_id?: string } };
       if (s.code !== 0) {
-        throw Object.assign(new Error(`reply_card: ${s.msg || s.code}`), { code: s.code });
+        throw Object.assign(new Error(`send_card: ${s.msg || s.code}`), { code: s.code });
       }
       const outboundId = s.data?.message_id;
       if (outboundId) this.onOutboundMessageId?.(outboundId);
       debugLog("feishu.cardkit.started", {
         cardId: this.cardId,
         messageId: outboundId,
+        mode: isCreate ? "create" : "reply",
         printFrequencyMs: this.printFrequencyMs,
         printStep: this.printStep,
       });
@@ -219,18 +249,25 @@ export class CardKitStream {
   /**
    * 结束流式：
    * 1) 推送最终正文
-   * 2) 关闭 streaming_mode
+   * 2) 关闭 streaming_mode（只做一次）
    * 3) 全量更新卡片（header 改为「回复」/绿，避免一直停在「回复中」）
+   *
+   * 可重复调用：暂停（paused）之后这张卡还要刷成终态，那一步走 updateFinal。
    */
-  async close(finalText?: string, finalStatus: "done" | "stopped" | "failed" = "done"): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
+  async close(
+    finalText?: string,
+    finalStatus: CardKitCardStatus = "done",
+    note?: string,
+  ): Promise<void> {
     if (finalText) this.ensureFinal(finalText);
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;
     }
     if (this.startPromise) await this.startPromise.catch(() => {});
+
+    const firstClose = !this.closed;
+    this.closed = true;
 
     if (this.failed || !this.cardId) {
       if (this.fullText.trim()) {
@@ -241,86 +278,117 @@ export class CardKitStream {
     }
 
     try {
-      if (this.fullText !== this.lastSent) await this.putContent(this.fullText);
-      // 给客户端一点时间把剩余字符打完
-      await sleep(Math.max(200, this.printFrequencyMs * 4));
-      const t = await withRetry(() => this.getToken(), {
-        maxRetries: 3,
-        label: "feishu.cardkit.close_token",
-      });
-
-      // 先关 streaming_mode
-      // 收尾这一步必须重试：CardKit 卡的 header 还是「回复中」，
-      // 一次 fetch failed 就会让这张卡永远停在「回复中」，只能靠人手动忽略。
-      const settingsRes = await withRetry(() =>
-        fetch(`${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}/settings`, {
-          method: "PATCH",
-          headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            settings: JSON.stringify({
-              config: {
-                streaming_mode: false,
-                summary: { content: (this.fullText.slice(0, 50) || "Pi").replace(/\s+/g, " ") },
-              },
-            }),
-            sequence: ++this.sequence,
-            uuid: `c_${this.cardId}_${this.sequence}`,
-          }),
-        }),
-        { maxRetries: 3, label: "feishu.cardkit.close_settings" },
-      );
-      if (!settingsRes.ok) {
-        debugLog("feishu.cardkit.settings_error", {
-          status: settingsRes.status,
-          body: (await settingsRes.text()).slice(0, 300),
-        });
+      if (firstClose) {
+        if (this.fullText !== this.lastSent) await this.putContent(this.fullText);
+        // 给客户端一点时间把剩余字符打完
+        await sleep(Math.max(200, this.printFrequencyMs * 4));
+        await this.stopStreaming();
       }
-
-      // 再全量更新卡片：header 改为最终状态，并去掉停止按钮
-      const finalCard = buildCardKitCardJson({
-        status: finalStatus,
-        body: this.fullText,
-        key: this.conversationKey,
-        runId: this.runId,
-        streaming: false,
-      });
-      const updateRes = await withRetry(() =>
-        fetch(`${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}`, {
-          method: "PUT",
-          headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            card: {
-              type: "card_json",
-              data: JSON.stringify(finalCard),
-            },
-            sequence: ++this.sequence,
-            uuid: `u_${this.cardId}_${this.sequence}`,
-          }),
-        }),
-        { maxRetries: 3, label: "feishu.cardkit.close_update" },
-      );
-      const updateJson = (await updateRes.json().catch(() => ({}))) as CardKitResponse;
-      if (!updateRes.ok || (updateJson.code != null && updateJson.code !== 0)) {
-        debugLog("feishu.cardkit.full_update_error", {
-          status: updateRes.status,
-          code: updateJson.code,
-          msg: updateJson.msg,
-        });
-      }
-
-      debugLog("feishu.cardkit.closed", {
-        cardId: this.cardId,
-        length: this.fullText.length,
-        finalStatus,
-        headerTitle: (finalCard as any).header?.title?.content,
-        hasStopButton: JSON.stringify(finalCard).includes("停止"),
-      });
+      await this.putFinalCard(finalStatus, note);
     } catch (e) {
       debugLog("feishu.cardkit.close_error", {
         error: e instanceof Error ? e.message : String(e),
       });
       if (this.fullText.trim()) await this.fallbackReply(this.fullText);
     }
+  }
+
+  /**
+   * 全量更新卡片（流式已关也能再刷）。
+   * 暂停卡要能翻成「已选择 / 已停止」，否则会永远停在「等你选择」。
+   */
+  async updateFinal(finalStatus: CardKitCardStatus, note?: string): Promise<void> {
+    try {
+      await this.putFinalCard(finalStatus, note);
+    } catch (e) {
+      debugLog("feishu.cardkit.full_update_throw", {
+        status: finalStatus,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  /** 关闭 streaming_mode（只做一次） */
+  private async stopStreaming(): Promise<void> {
+    const t = await withRetry(() => this.getToken(), {
+      maxRetries: 3,
+      label: "feishu.cardkit.close_token",
+    });
+
+    // 收尾这一步必须重试：CardKit 卡的 header 还是「回复中」，
+    // 一次 fetch failed 就会让这张卡永远停在「回复中」，只能靠人手动忽略。
+    const settingsRes = await withRetry(() =>
+      fetch(`${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}/settings`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: JSON.stringify({
+            config: {
+              streaming_mode: false,
+              summary: { content: (this.fullText.slice(0, 50) || "Pi").replace(/\s+/g, " ") },
+            },
+          }),
+          sequence: ++this.sequence,
+          uuid: `c_${this.cardId}_${this.sequence}`,
+        }),
+      }),
+      { maxRetries: 3, label: "feishu.cardkit.close_settings" },
+    );
+    if (!settingsRes.ok) {
+      debugLog("feishu.cardkit.settings_error", {
+        status: settingsRes.status,
+        body: (await settingsRes.text()).slice(0, 300),
+      });
+    }
+  }
+
+  /** 全量更新卡片正文与 header（不做流式收尾，可重复调用） */
+  private async putFinalCard(finalStatus: CardKitCardStatus, note?: string): Promise<void> {
+    if (!this.cardId) return;
+    const t = await withRetry(() => this.getToken(), {
+      maxRetries: 3,
+      label: "feishu.cardkit.close_token",
+    });
+    const finalCard = buildCardKitCardJson({
+      status: finalStatus,
+      body: this.fullText,
+      note,
+      key: this.conversationKey,
+      runId: this.runId,
+      title: this.title,
+      streaming: false,
+    });
+    const updateRes = await withRetry(() =>
+      fetch(`${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          card: {
+            type: "card_json",
+            data: JSON.stringify(finalCard),
+          },
+          sequence: ++this.sequence,
+          uuid: `u_${this.cardId}_${this.sequence}`,
+        }),
+      }),
+      { maxRetries: 3, label: "feishu.cardkit.close_update" },
+    );
+    const updateJson = (await updateRes.json().catch(() => ({}))) as CardKitResponse;
+    if (!updateRes.ok || (updateJson.code != null && updateJson.code !== 0)) {
+      debugLog("feishu.cardkit.full_update_error", {
+        status: updateRes.status,
+        code: updateJson.code,
+        msg: updateJson.msg,
+      });
+    }
+
+    debugLog("feishu.cardkit.closed", {
+      cardId: this.cardId,
+      length: this.fullText.length,
+      finalStatus,
+      headerTitle: (finalCard as any).header?.title?.content,
+      hasStopButton: JSON.stringify(finalCard).includes("停止"),
+    });
   }
 }
 

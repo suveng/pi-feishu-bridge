@@ -9,6 +9,12 @@ export type PromptWatchOptions = {
   onStillRunning?: () => void;
   /** Called when the hard timeout fires; use it to abort the underlying run so it is not left busy. */
   onHardTimeout?: () => Promise<void> | void;
+  /**
+   * 返回 true 表示当前正处于「等用户作答」的暂停态（feishu_ask）。
+   * 这种情况下硬超时不会拒掉本轮，而是重新计时——等用户点选的时间不该算进模型超时，
+   * 否则用户在选择题上多坐一会，整轮就会被 abort 掉。
+   */
+  isPaused?: () => boolean;
 };
 
 /**
@@ -22,7 +28,7 @@ export type PromptWatchOptions = {
  * background (which would otherwise leave it busy for follow-up messages).
  */
 export async function waitForPrompt(prompt: Promise<unknown>, options: PromptWatchOptions): Promise<void> {
-  const { notifyMs, hardMs, hardTimeoutMessage, onStillRunning, onHardTimeout } = options;
+  const { notifyMs, hardMs, hardTimeoutMessage, onStillRunning, onHardTimeout, isPaused } = options;
 
   if (notifyMs <= 0 && hardMs <= 0) {
     await prompt;
@@ -41,12 +47,20 @@ export async function waitForPrompt(prompt: Promise<unknown>, options: PromptWat
   }
 
   if (hardMs > 0) {
-    hardTimer = setTimeout(() => {
-      const error = new Error(hardTimeoutMessage);
-      hardReject?.(error);
-      void Promise.resolve(onHardTimeout?.()).catch(() => undefined);
-    }, hardMs);
-    hardTimer.unref?.();
+    // 可重臂：等用户作答（feishu_ask）期间硬超时顺延，避免把等待时间算成模型超时
+    const armHardTimer = () => {
+      hardTimer = setTimeout(() => {
+        if (isPaused?.()) {
+          armHardTimer();
+          return;
+        }
+        const error = new Error(hardTimeoutMessage);
+        hardReject?.(error);
+        void Promise.resolve(onHardTimeout?.()).catch(() => undefined);
+      }, hardMs);
+      hardTimer.unref?.();
+    };
+    armHardTimer();
   }
 
   try {

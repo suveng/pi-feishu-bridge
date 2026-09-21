@@ -340,6 +340,8 @@ Windows PATH 加入 C:\Program Files\Git\bin
 
 > 注意：长时间任务（例如跑测试、构建、批量处理）默认**不会**再被报为“任务失败”——到达 `promptNotifySec` 后只会在飞书里提示“任务仍在处理中”，回复卡片保持“回复中”，完成后正常送达结果。只有显式设置 `promptTimeoutSec` 后才会硬超时。修改后请执行 `/feishu restart` 生效。
 
+> 等用户作答（`feishu_ask` 选择题）的时间**不计入**硬超时：暂停等待期间定时器会顺延。仍建议把 `promptTimeoutSec` 设为 `0` 或大于选择题等待时长（10 分钟），便于一眼看出实际耗时口径。
+
 ### 运行时配置
 
 以下桥接设置可以在**与机器人的私聊**里用 `/config` 立即修改，无需重启，并保存到各自平台数据目录下的 `runtime-overrides.json`（Pi 为 `~/.pi/agent/feishu/`，DSH 为 `~/.dsh/feishu/`）：

@@ -21,10 +21,13 @@ import type { FeishuState } from "../../feishu/types.ts";
 import type { ConversationRuntime, ConversationStatus, ContextUsage, RuntimeModel, StopConversationResult, ConversationTimeouts } from "../../feishu/runtime.ts";
 import type { FeishuUiNotifyPayload } from "../../feishu/ui-notify.ts";
 import {
+  ASK_TIMEOUT_MS,
   buildAskCard,
-  cancelAsk,
+  cancelAskBySession,
+  failAsk,
   registerAsk,
   setAskCardMessage,
+  type AskHistoryEntry,
   type AskOutcome,
   type AskQuestion,
 } from "../../feishu/ask.ts";
@@ -49,6 +52,12 @@ type ActiveRun = {
   status?: ReplyCardSink;
   /** 当前轮流式回调（由 promptWithImages 设置） */
   onDelta?: (delta: string) => void;
+  /** 正在等 feishu_ask 作答：硬超时要顺延，不能把等待时间算成模型超时 */
+  pausedForAsk?: boolean;
+  /** 本轮已经发出去的选择题卡片消息 ID；同轮第二次 ask 复用同一张卡 */
+  askCardMessageId?: string;
+  /** 本轮已经答过的旧问题，附到下一张选择题卡顶部 */
+  askHistory: AskHistoryEntry[];
 };
 
 type ModelRuntimeAdapter = {
@@ -156,6 +165,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     this.cwd = cwd;
     this.bridge = bridge;
     this.timeouts = timeouts;
+    this.warnOnAskTimeoutConflict();
     ensureRoot();
     this.state = readJson<FeishuState>(STATE_PATH, { sessions: {} });
     this.state.sessions ||= {};
@@ -164,9 +174,24 @@ export class PiConversationRuntime implements ConversationRuntime {
     this.loadSettingsDefault();
   }
 
+  /**
+   * 启动时检查「硬超时」与「选择题等待时长」的关系。
+   * 等待期间硬超时会顺延（见 withTimeout 的 isPaused），这里是给配置者的一条提醒，
+   * 避免把 promptTimeoutSec 设得比 ASK_TIMEOUT_MS 还小时误以为整轮会被卡死。
+   */
+  private warnOnAskTimeoutConflict() {
+    const sec = this.timeouts.promptTimeoutSec;
+    if (typeof sec !== "number" || !Number.isFinite(sec) || sec <= 0) return;
+    if (sec * 1000 >= ASK_TIMEOUT_MS) return;
+    debugLog("feishu.prompt.ask_timeout_conflict", {
+      promptTimeoutSec: sec,
+      askTimeoutSec: Math.round(ASK_TIMEOUT_MS / 1000),
+      note: "promptTimeoutSec 小于选择题等待时长；等待期间硬超时会顺延，但建议设 0 或大于 askTimeoutSec",
+    });
+  }
+
   /** Read global settings default model for fallback in getSelectedModel. */
-  private loadSettingsDefault() {
-    try {
+  private loadSettingsDefault() {    try {
       const settingsPath = join(getAgentDir(), "settings.json");
       const raw = readFileSync(settingsPath, "utf-8");
       const settings = JSON.parse(raw);
@@ -205,7 +230,7 @@ export class PiConversationRuntime implements ConversationRuntime {
         debugLog("feishu.command.forwarded", { key, command: forwarded.split(/\s+/)[0] });
       }
       const session = await this.ensureSessionFresh(key);
-      const run: ActiveRun = { session, runId: status?.runId, stopped: false, status, onDelta };
+      const run: ActiveRun = { session, runId: status?.runId, stopped: false, status, onDelta, askHistory: [] };
       this.activeRuns.set(key, run);
       this.bridge?.beginFeishuInput(session.sessionId);
       this.enterFeishuTurn(key);
@@ -303,6 +328,9 @@ export class PiConversationRuntime implements ConversationRuntime {
     if (!active) return;
     debugLog("feishu.prompt.interrupted_by_new_message", { key, runId: active.runId });
     active.stopped = true;
+    // 先取消挂着的选择题：session.abort() 不会解除 feishu_ask 的等待，
+    // 不取消的话那个 Promise 会挂到 10 分钟超时，暂停卡也一直停在「等你选择」
+    await this.cancelPendingAsk(key, "被新消息打断");
     try {
       await active.status?.stopImmediately("已被新消息打断");
     } catch {}
@@ -314,6 +342,35 @@ export class PiConversationRuntime implements ConversationRuntime {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  /**
+   * 取消某会话里挂着的选择题，并把那张卡片刷成「提问已结束」。
+   * 返回被取消的条数（供日志/测试断言）。
+   */
+  private async cancelPendingAsk(key: string, reason: string): Promise<number> {
+    const canceled = cancelAskBySession(key);
+    if (!canceled.length) return 0;
+    debugLog("feishu.ask.canceled", { key, reason, count: canceled.length });
+    const updater = this.askCardUpdater;
+    if (updater) {
+      for (const record of canceled) {
+        if (!record.cardMessageId) continue;
+        try {
+          await updater(
+            record.cardMessageId,
+            buildAskCard(record.askId, record.questions, record.answers, "canceled"),
+          );
+        } catch (error) {
+          debugLog("feishu.ask.cancel_card_failed", {
+            askId: record.askId,
+            key,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+    return canceled.length;
   }
 
   /** 供 /status 使用 */
@@ -367,6 +424,8 @@ export class PiConversationRuntime implements ConversationRuntime {
 
     active.stopped = true;
     const body = active.status?.bodyText || "";
+    // 先取消选择题：否则 feishu_ask 的等待会一直挂着，本轮收不干净
+    await this.cancelPendingAsk(key, "用户点了停止");
     await active.status?.stopImmediately("已停止");
     try {
       await active.session.abort();
@@ -792,45 +851,128 @@ export class PiConversationRuntime implements ConversationRuntime {
     if (!this.askSender) throw new Error("飞书连接未就绪");
 
     const sender = this.askSender;
-    const outcome = await new Promise<AskOutcome>((resolve) => {
-      const record = registerAsk(key, questions, resolve, {
-        // 超时后必须把卡片原地刷成「已超时」：否则卡片还带着按钮，
-        // 用户再点只会被判为「迟到的点击」，而他看到的是一张「还在等你选」的卡。
-        onTimeout: (settled) => {
-          const updater = this.askCardUpdater;
-          const cardMessageId = settled.cardMessageId;
-          if (!updater || !cardMessageId) return;
-          void updater(cardMessageId, buildAskCard(settled.askId, settled.questions, settled.answers, "timeout"))
-            .catch((error) => {
-              debugLog("feishu.ask.timeout_card_failed", {
-                askId: settled.askId,
-                key,
-                error: error instanceof Error ? error.message : String(error),
+    const updater = this.askCardUpdater;
+    const run = this.activeRuns.get(key);
+    // 同一轮里第二次 ask 复用同一张卡（否则一轮会刷出 4 张以上的卡）
+    const reuseCardId = run?.askCardMessageId;
+    const history = run?.askHistory ?? [];
+
+    // 进入临界区：先把正在流式的卡定格成「等你选择」，并告诉硬超时这里在等人
+    if (run) run.pausedForAsk = true;
+    await this.pauseCardForAsk(run);
+
+    let outcome: AskOutcome | undefined;
+    try {
+      outcome = await new Promise<AskOutcome>((resolve) => {
+        const record = registerAsk(key, questions, resolve, {
+          // 超时后必须把卡片原地刷成「已超时」：否则卡片还带着按钮，
+          // 用户再点只会被判为「迟到的点击」，而他看到的是一张「还在等你选」的卡。
+          onTimeout: (settled) => {
+            const timeoutUpdater = this.askCardUpdater;
+            const cardMessageId = settled.cardMessageId;
+            if (!timeoutUpdater || !cardMessageId) return;
+            void timeoutUpdater(cardMessageId, buildAskCard(settled.askId, settled.questions, settled.answers, "timeout"))
+              .catch((error) => {
+                debugLog("feishu.ask.timeout_card_failed", {
+                  askId: settled.askId,
+                  key,
+                  error: error instanceof Error ? error.message : String(error),
+                });
               });
-            });
-        },
-      });
-      void sender(key, buildAskCard(record.askId, questions, record.answers))
-        .then((messageId) => {
-          // 回填卡片消息 ID，超时刷卡片时要用
-          if (messageId) setAskCardMessage(record.askId, messageId);
-        })
-        .catch((error) => {
-          debugLog("feishu.ask.send_failed", {
-            askId: record.askId,
-            key,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          cancelAsk(record.askId);
+          },
         });
-    });
+        const askCard = buildAskCard(record.askId, questions, record.answers, "pending", history);
+        // 已有卡片就原地追加新问题，不再另开一张（把一輪的卡数封顶在 3 张）
+        const send = reuseCardId && updater
+          ? updater(reuseCardId, askCard).then(() => reuseCardId)
+          : sender(key, askCard);
+        void send
+          .then((messageId) => {
+            // 回填卡片消息 ID，超时刷卡片时要用
+            if (!messageId) return;
+            setAskCardMessage(record.askId, messageId);
+            if (run) run.askCardMessageId = messageId;
+          })
+          .catch((error) => {
+            debugLog("feishu.ask.send_failed", {
+              askId: record.askId,
+              key,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            // 发送失败 ≠ 用户没选：走 failAsk，让模型知道这道题用户根本没看到
+            failAsk(record.askId);
+          });
+      });
+    } finally {
+      if (run) run.pausedForAsk = false;
+      // 记下本轮已答的旧问题，供本轮下一张选择题卡展示
+      if (run && outcome) {
+        for (const answer of outcome.answers) {
+          if (answer.chosen) run.askHistory.push({ question: answer.question, chosen: answer.chosen });
+        }
+      }
+      // 关键不变量：出临界区时绝不允许留下 paused 卡（详见 settleCardAfterAsk）
+      await this.settleCardAfterAsk(run, outcome);
+    }
+
     debugLog("feishu.ask.settled", {
       key,
       timedOut: outcome.timedOut,
+      canceled: Boolean(outcome.canceled),
       answered: outcome.answers.filter((answer) => answer.chosen).length,
       total: outcome.answers.length,
     });
     return outcome;
+  }
+
+  /** 进入选择题等待：把流式卡定格成「等你选择」，失败不影响提问本身 */
+  private async pauseCardForAsk(run: ActiveRun | undefined): Promise<void> {
+    const card = run?.status;
+    if (!card) return;
+    try {
+      await card.pauseForAsk("等你选择");
+    } catch (error) {
+      debugLog("feishu.ask.pause_card_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * 选择题临界区出口：无论哪条路径，都必须把 paused 消掉。
+   * - 正常作答 / 超时 → resume()：把暂停卡翻成「已选择」，再开一段新卡继续写
+   * - 被取消（停止/新消息打断）→ 直接收尾成「已停止」：那一轮已经作废，不能再开新卡
+   */
+  private async settleCardAfterAsk(
+    run: ActiveRun | undefined,
+    outcome: AskOutcome | undefined,
+  ): Promise<void> {
+    const card = run?.status;
+    if (!card) return;
+    try {
+      // canceled 只有一个真正要停卡的来源：整轮被停止 / 被新消息打断
+      // （stopConversation / interruptActiveRun 都是先把 run.stopped 置 true 再取消提问）。
+      // 提问卡片发送失败走的是 sendFailed（不是 canceled）：那种情况本轮还在继续，
+      // 把卡停在「已停止」会让最后的 completeWithAnswer 被终态守卫直接丢掉。
+      const stopped = Boolean(outcome?.canceled) && Boolean(run?.stopped);
+      if (!stopped) {
+        await card.resume();
+        return;
+      }
+      await card.finish("stopped", "提问已结束");
+    } catch (error) {
+      debugLog("feishu.ask.settle_card_failed", {
+        canceled: Boolean(outcome?.canceled),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      // 兜底：上面两步都没能把它拉出 paused 时，绝不允许把中间态留在卡片上
+      if (card.paused) {
+        try {
+          await card.finish("stopped", "已停止");
+        } catch {}
+      }
+    }
   }
 
   /**
@@ -850,6 +992,7 @@ export class PiConversationRuntime implements ConversationRuntime {
         "Replying through Feishu and the user must choose between options: call feishu_ask, do not list options as plain text.",
         "Keep option labels short (<= 10 chars); put the trade-off explanation into description.",
         "At most 4 questions per call; each question gets 2-4 options.",
+        "Ask everything you need in ONE call (up to 4 questions). Ask again later only when the next question truly depends on the previous answer.",
       ],
       parameters: Type.Object({
         questions: Type.Array(
@@ -1048,6 +1191,8 @@ export class PiConversationRuntime implements ConversationRuntime {
           await session.abort();
         } catch {}
       },
+      // 正在等用户作答时硬超时顺延：把用户在选择题上花的时间算成「模型超时」会误杀整轮
+      isPaused: () => Boolean(this.activeRuns.get(key)?.pausedForAsk),
     });
   }
 
@@ -1408,6 +1553,11 @@ function normalizeAskQuestions(input: unknown): AskQuestion[] {
 
 /** 把用户选择整理成交给模型的文本 */
 function formatAskOutcome(outcome: AskOutcome): string {
+  // 卡片没发出去时绝不能报「未选择」：模型会把那当成用户的决定，接着按默认值往下答
+  if (outcome.sendFailed) {
+    return "选择题卡片发送失败：用户没有收到这道题，请勿把未作答当成用户的决定。"
+      + "要么重新调用 feishu_ask 再问一次，要么改用纯文本提问。";
+  }
   const lines = outcome.answers.map(
     (answer, index) => `${index + 1}. [${answer.header}] ${answer.question} → ${answer.chosen ?? "（未选择）"}`,
   );
