@@ -54,8 +54,6 @@ type ActiveRun = {
   onDelta?: (delta: string) => void;
   /** 正在等 feishu_ask 作答：硬超时要顺延，不能把等待时间算成模型超时 */
   pausedForAsk?: boolean;
-  /** 本轮已经发出去的选择题卡片消息 ID；同轮第二次 ask 复用同一张卡 */
-  askCardMessageId?: string;
   /** 本轮已经答过的旧问题，附到下一张选择题卡顶部 */
   askHistory: AskHistoryEntry[];
 };
@@ -851,10 +849,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     if (!this.askSender) throw new Error("飞书连接未就绪");
 
     const sender = this.askSender;
-    const updater = this.askCardUpdater;
     const run = this.activeRuns.get(key);
-    // 同一轮里第二次 ask 复用同一张卡（否则一轮会刷出 4 张以上的卡）
-    const reuseCardId = run?.askCardMessageId;
     const history = run?.askHistory ?? [];
 
     // 进入临界区：先把正在流式的卡定格成「等你选择」，并告诉硬超时这里在等人
@@ -882,16 +877,21 @@ export class PiConversationRuntime implements ConversationRuntime {
           },
         });
         const askCard = buildAskCard(record.askId, questions, record.answers, "pending", history);
-        // 已有卡片就原地追加新问题，不再另开一张（把一輪的卡数封顶在 3 张）
-        const send = reuseCardId && updater
-          ? updater(reuseCardId, askCard).then(() => reuseCardId)
-          : sender(key, askCard);
+        // 每次都平铺新卡，绝不复用旧卡原地改写。
+        // 回归背景：本轮第一次提问作答后 resume 会开出一段新回复卡，此时若把第二次
+        // 提问写回第一张旧卡，新问题就停留在旧位置上、新回复卡又排在它下面 ——
+        // 用户看到的是「选择题卡被盖住 / 顺序颠倒」，还会误点新回复卡上的停止。
+        debugLog("feishu.ask.card_creating", {
+          askId: record.askId,
+          key,
+          historyCount: history.length,
+        });
+        const send = sender(key, askCard);
         void send
           .then((messageId) => {
             // 回填卡片消息 ID，超时刷卡片时要用
             if (!messageId) return;
             setAskCardMessage(record.askId, messageId);
-            if (run) run.askCardMessageId = messageId;
           })
           .catch((error) => {
             debugLog("feishu.ask.send_failed", {
