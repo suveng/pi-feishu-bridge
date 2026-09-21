@@ -25,6 +25,7 @@ Bilibili: <https://space.bilibili.com/4489397>
   - `open`: reply directly in groups and topics without an @; you still need to manually enable the "**receive all messages in group chats**" permission for the bot in the Feishu developer console
   - `mention`: reply only when the bot is `@`-mentioned, a keyword matches, or someone replies to a bot message (the latter two are optional)
 - Attachment inputs including images, code files, and text files; image understanding depends on whether the selected model supports images
+- Archive (.zip) attachments are downloaded to a local inbox (`~/.pi/agent/feishu/inbox/<message-id>/`) and the path is passed into the prompt, so the agent can unpack large log bundles itself instead of having them truncated by the context
 - Parse Feishu interactive alert cards; when replying to a message or card, the original content can be passed to Pi together
 - Group keyword triggers, and follow-up questions by replying to bot messages
 - Switch the model, workspace, past sessions, and thinking level of the current conversation inside Feishu

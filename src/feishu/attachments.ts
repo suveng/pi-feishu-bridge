@@ -1,3 +1,7 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { ROOT_DIR } from "./config.ts";
+
 export type FeishuImageInput = { type: "image"; data: string; mimeType: string };
 
 const SUPPORTED_IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/webp"]);
@@ -11,8 +15,15 @@ const SUPPORTED_TEXT_EXT = new Set([
   ".c", ".cc", ".cpp", ".h", ".hpp", ".cs",
 ]);
 const SUPPORTED_TEXT_BASENAME = new Set(["dockerfile", "makefile", ".gitignore"]);
+/**
+ * 压缩包：不当文本读，也不当「类型不支持」丢掉。
+ * 背景：客户端诊断会把 app_logs_*.zip 发进飞书，直接丢弃等于诊断断在半路。
+ */
+const SUPPORTED_ARCHIVE_EXT = new Set([".zip"]);
 const MAX_TEXT_FILE_BYTES = 800_000;
 const MAX_TEXT_FILE_CHARS = 16_000;
+/** 压缩包落地目录（收件箱），agent 从这里自己解压读取 */
+const INBOX_DIR = join(ROOT_DIR, "inbox");
 
 export function isSupportedImageMime(mimeType: string | undefined): mimeType is string {
   return Boolean(mimeType && SUPPORTED_IMAGE_MIME.has(mimeType));
@@ -24,6 +35,55 @@ export function isSupportedTextFile(fileName: string) {
   const idx = lower.lastIndexOf(".");
   if (idx < 0) return false;
   return SUPPORTED_TEXT_EXT.has(lower.slice(idx));
+}
+
+/** 是否是压缩包附件（按扩展名判断） */
+export function isArchiveFile(fileName: string) {
+  const lower = fileName.toLowerCase();
+  const idx = lower.lastIndexOf(".");
+  if (idx < 0) return false;
+  return SUPPORTED_ARCHIVE_EXT.has(lower.slice(idx));
+}
+
+/**
+ * 清洗附件名 / 消息 ID，只留安全文件名。
+ * 必须做：附件名来自用户，`../../x.zip` 这类会把落地路径带出目录。
+ */
+export function sanitizeAttachmentName(name: string) {
+  const base = name.split(/[\\/]/).pop() ?? "";
+  const cleaned = base
+    .replace(/[\u0000-\u001f<>:"|?*]/g, "")
+    .replace(/^\.+/, "")
+    .trim();
+  return cleaned || "attachment";
+}
+
+/**
+ * 压缩包落盘到收件箱，返回绝对路径。
+ * 为什么落盘而不是解压进 prompt：日志包动辄几十 MB，塞进上下文只会被截断。
+ * 落盘后由 agent 自己 unzip/grep，诊断链路才是闭环的。
+ */
+export function saveArchiveToInbox(messageId: string, fileName: string, bytes: Buffer, baseDir = INBOX_DIR) {
+  const dir = join(baseDir, sanitizeAttachmentName(messageId));
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, sanitizeAttachmentName(fileName));
+  writeFileSync(path, bytes);
+  return path;
+}
+
+function formatBytes(size: number) {
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${size} B`;
+}
+
+/** 生成压缩包在 prompt 里的说明段（含本地路径与解压提示） */
+export function buildArchiveSection(fileName: string, path: string, bytes: number) {
+  return [
+    `[Feishu archive: ${fileName}]`,
+    `已保存到本地：${path}（${formatBytes(bytes)}）`,
+    `这是压缩包，未解压。先用 \`unzip -l "${path}"\`（或 \`python3 -m zipfile -l "${path}"\`）看条目，再解压需要的文件读取内容。`,
+  ].join("\n");
 }
 
 export function decodeTextFile(fileName: string, bytes: Buffer): { ok: true; text: string; truncated: boolean } | { ok: false } {

@@ -1,4 +1,4 @@
-import { detectCodeLanguage, decodeTextFile, detectImageMime, type FeishuImageInput, isSupportedImageMime, isSupportedTextFile } from "./attachments.ts";
+import { buildArchiveSection, detectCodeLanguage, decodeTextFile, detectImageMime, type FeishuImageInput, isArchiveFile, isSupportedImageMime, isSupportedTextFile, saveArchiveToInbox } from "./attachments.ts";
 import { buildDeliveryCard, buildModelCard, buildResumeCard, buildThinkingCard } from "./cards.ts";
 import type { ConversationRuntime } from "./runtime.ts";
 import { claimFeishuMessage, markFeishuMessage } from "./dedupe-store.ts";
@@ -473,6 +473,39 @@ export class FeishuMessageHandler {
       }
 
       const fileName = attachment.fileName || "unnamed";
+
+      // 压缩包：落盘给 agent 自己解压，不塞进 prompt（日志包太大，塞进去只会被截断）
+      if (isArchiveFile(fileName)) {
+        if (!transport) {
+          downloadErrors.push(`飞书连接不可用，压缩包无法下载：${fileName}`);
+          continue;
+        }
+        try {
+          // 压缩包可能很大，下载超时比普通文件放宽
+          const resource = await withTimeout(
+            transport.downloadMessageResource(msg.messageId, attachment.fileKey, "file"),
+            60000,
+            `压缩包下载超时：${fileName}`,
+          );
+          const savedPath = saveArchiveToInbox(msg.messageId, fileName, resource.bytes);
+          debugLog("feishu.handler.archive_saved", {
+            messageId: msg.messageId,
+            fileKey: attachment.fileKey,
+            path: savedPath,
+            bytes: resource.bytes.length,
+          });
+          fileSections.push(buildArchiveSection(fileName, savedPath, resource.bytes.length));
+        } catch (error) {
+          debugLog("feishu.handler.archive_error", {
+            messageId: msg.messageId,
+            fileKey: attachment.fileKey,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          downloadErrors.push(error instanceof Error ? error.message : `压缩包下载失败：${fileName}`);
+        }
+        continue;
+      }
+
       if (!isSupportedTextFile(fileName)) {
         downloadErrors.push(`文件类型不支持：${fileName}`);
         continue;
