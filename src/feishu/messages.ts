@@ -22,6 +22,72 @@ export function normalizeForDedupe(text: string) {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * 归一化到「只留内容」的形态：去空白、去中英文标点、统一小写。
+ * 近重复判断用它，避免「只改了个错别字 / 少打一个逗号」被当成两条不同消息。
+ */
+export function normalizeForSimilarity(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[\u3000-\u303f\uff00-\uffef!-/:-@[-`{-~]/g, "");
+}
+
+/** 相似度超过这个值就算「同一句话」 */
+export const NEAR_DUPLICATE_THRESHOLD = 0.9;
+
+/**
+ * 文本相似度（1 = 完全相同，0 = 毫无关系）：按编辑距离归一化。
+ * 实测：改一个错别字的重复请求 0.952（拦下）；补一句追问「…了吗」0.8（放行）。
+ */
+export function textSimilarity(a: string, b: string): number {
+  const x = normalizeForSimilarity(a);
+  const y = normalizeForSimilarity(b);
+  if (!x && !y) return 1;
+  if (!x || !y) return 0;
+  if (x === y) return 1;
+  // 超长文本（粘贴日志等）不做逐字编辑距离：代价高且它们本来就不像重复请求
+  const CAP = 2000;
+  const left = x.slice(0, CAP);
+  const right = y.slice(0, CAP);
+  return 1 - levenshteinDistance(left, right) / Math.max(left.length, right.length);
+}
+
+function levenshteinDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  let cur = new Array<number>(n + 1);
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return prev[n];
+}
+
+/** 强制重跑的标记前缀：加了就直接开新一轮，不再被近重复拦住 */
+export const RERUN_MARKERS = ["重发", "/again", "/重发"];
+
+/**
+ * 去掉「重发 / /again」前缀，返回真正要送给模型的正文。
+ * 没有前缀时原样返回（调用方据此判断用户是否显式要求重跑）。
+ */
+export function stripRerunMarker(text: string): string {
+  const trimmed = text.trimStart();
+  const lower = trimmed.toLowerCase();
+  for (const marker of RERUN_MARKERS) {
+    if (!lower.startsWith(marker.toLowerCase())) continue;
+    return trimmed.slice(marker.length).replace(/^[\s:：,，、-]+/, "");
+  }
+  return text;
+}
+
 export function pruneRecentMap(map: Map<string, number>, now: number, ttlMs: number) {
   for (const [key, timestamp] of map) {
     if (now - timestamp > ttlMs) map.delete(key);

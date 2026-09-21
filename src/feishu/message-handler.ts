@@ -10,17 +10,27 @@ import {
   getRuntimeOverrides,
   setRuntimeConfig,
 } from "./runtime-config.ts";
-import { conversationKey, conversationLabel, buildPromptWithQuote, getCommandList, normalizeForDedupe, parseBotCommand, parseMessageInput, pruneRecentMap } from "./messages.ts";
+import { conversationKey, conversationLabel, buildPromptWithQuote, getCommandList, normalizeForDedupe, parseBotCommand, parseMessageInput, pruneRecentMap, stripRerunMarker, textSimilarity, NEAR_DUPLICATE_THRESHOLD } from "./messages.ts";
 import { ReplyCard, resolveCardTarget } from "./reply-card.ts";
 import type { FeishuBridgeStore } from "./bridge-store.ts";
 import type { FeishuTransport } from "./transport.ts";
 import type { FeishuMessage } from "./types.ts";
 
 const CONTENT_DEDUPE_TTL_MS = 5_000;
+/**
+ * 「同一句话重发」的拦截窗口。
+ * 回归背景：用户把同一句话改一个错别字重发，桥接会再跑一轮，模型于是把同一个
+ * 选择题又问一遍（看起来像重复回复）。这里拦下来，并告诉他怎么强制重跑。
+ */
+const NEAR_DUPLICATE_TTL_MS = 10 * 60 * 1000;
+/** 短消息（「好」「继续」）不参与近重复判断：误拦概率远大于收益 */
+const NEAR_DUPLICATE_MIN_CHARS = 8;
 
 export class FeishuMessageHandler {
   private readonly seen = new Set<string>();
   private readonly recentContent = new Map<string, number>();
+  /** 每个会话最近一次送进模型的正文，用于「同一句话重发」拦截 */
+  private readonly recentPrompts = new Map<string, { text: string; at: number }>();
   private readonly conversations: ConversationRuntime;
   private readonly getTransport: () => FeishuTransport | undefined;
   private readonly bridgeStore?: FeishuBridgeStore;
@@ -38,6 +48,7 @@ export class FeishuMessageHandler {
   reset() {
     this.seen.clear();
     this.recentContent.clear();
+    this.recentPrompts.clear();
   }
 
   async handle(msg: FeishuMessage) {
@@ -113,8 +124,18 @@ export class FeishuMessageHandler {
         }
       }
 
-      if (this.isDuplicateContent(msg, key, text, parsed.attachments)) {
+      // 「重发 / /again」是显式要求重跑：剥掉前缀后照常开新一轮
+      const withoutMarker = stripRerunMarker(text);
+      const forceRerun = withoutMarker !== text;
+      if (forceRerun) text = withoutMarker;
+
+      if (!forceRerun && this.isDuplicateContent(msg, key, text, parsed.attachments)) {
         await mark("ignored");
+        return;
+      }
+
+      if (!forceRerun && (await this.guardNearDuplicate(msg, key, text))) {
+        await mark("replied");
         return;
       }
 
@@ -359,6 +380,48 @@ export class FeishuMessageHandler {
     this.recentContent.set(contentKey, now);
     if (this.recentContent.size > 2000) pruneRecentMap(this.recentContent, now, CONTENT_DEDUPE_TTL_MS);
     return false;
+  }
+
+  /**
+   * 近重复消息拦截（同一会话、同一人、10 分钟内、内容高度相似）。
+   *
+   * 为什么要拦：用户把同一句话改个错别字重发，会再开一轮，模型把同一个选择题
+   * 又问一遍，看起来像「重复回复」。拦下时会告诉他怎么显式重跑（「重发」前缀）。
+   * 返回 true = 已拦下（调用方结束本轮）。
+   */
+  private async guardNearDuplicate(msg: FeishuMessage, key: string, text: string): Promise<boolean> {
+    const probe = normalizeForDedupe(text);
+    const memoryKey = `${key}\u0000${msg.senderOpenId}`;
+    const now = Date.now();
+    const previous = this.recentPrompts.get(memoryKey);
+
+    // 短消息不参与判断，但仍然记下来（后续长消息可以拿来比）
+    if (probe.replace(/\s+/g, "").length >= NEAR_DUPLICATE_MIN_CHARS) {
+      this.recentPrompts.set(memoryKey, { text: probe, at: now });
+      if (this.recentPrompts.size > 2000) {
+        for (const [entryKey, entry] of this.recentPrompts) {
+          if (now - entry.at > NEAR_DUPLICATE_TTL_MS) this.recentPrompts.delete(entryKey);
+        }
+      }
+    }
+
+    if (!previous || now - previous.at > NEAR_DUPLICATE_TTL_MS) return false;
+    const score = textSimilarity(previous.text, probe);
+    if (score < NEAR_DUPLICATE_THRESHOLD) return false;
+
+    const seconds = Math.round((now - previous.at) / 1000);
+    debugLog("feishu.handler.near_duplicate", {
+      messageId: msg.messageId,
+      key,
+      score: Number(score.toFixed(3)),
+      secondsAgo: seconds,
+    });
+    await this.getTransport()?.replyText(
+      msg.messageId,
+      `这条和 ${seconds} 秒前那条几乎一样（相似度 ${Math.round(score * 100)}%），我就不重开一轮了。\n`
+        + `确实要我再跑一遍，就在开头加「重发」，例如：重发 ${text.slice(0, 40)}`,
+    );
+    return true;
   }
 
   private async processAttachments(
