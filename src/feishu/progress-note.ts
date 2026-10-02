@@ -53,6 +53,8 @@ export type ProgressTrackerOptions = {
 
 const DEFAULT_COMMAND_CHARS = 200;
 const DEFAULT_REFRESH_SECONDS = 5;
+/** 折叠面板标题里的命令摘要长度（只一行，不能占满） */
+const TITLE_DETAIL_CHARS = 30;
 /** 工具名补齐宽度，便于竖排扫读 */
 const TOOL_NAME_WIDTH = 7;
 
@@ -273,6 +275,26 @@ export class ProgressTracker {
       if (this.entries[i].endedAt == null) return this.entries[i];
     }
     return undefined;
+  }
+
+  /**
+   * 折叠面板的标题摘要（单行）。
+   *
+   * 这是**面板收起后唯一能看出「还在干活」的东西**：清单一収，用户就又回到
+   * 「不知道卡没卡」的状态，而工具执行期间 Pi 不会输出任何正文，面板外的卡片
+   * 完全静止 —— 所以标题必须带上当前动作与耗时。
+   */
+  renderTitle(now: number = Date.now()): string {
+    if (this.opts.mode === "off" || this.entries.length === 0) return "执行过程";
+    const running = this.findRunning();
+    if (!running) return `执行过程（已完成 ${this.entries.length} 步）`;
+    const elapsed = this.quantizeElapsed(now - running.startedAt);
+    // 单个工具跑很久时，标题上的耗时是「还活着」最直接的证据
+    const cost = elapsed >= this.opts.timeoutSeconds * 1000
+      ? ` · 已 ${formatDuration(elapsed)}`
+      : "";
+    const detail = running.detail ? ` · ${toSingleLine(running.detail, TITLE_DETAIL_CHARS)}` : "";
+    return `执行过程（正在执行 ${running.toolName}${detail}${cost}）`;
   }
 }
 

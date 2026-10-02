@@ -70,7 +70,11 @@ test("progressEnabled 时建卡即预留清单元件，且排在正文之前", a
     await stream.startImmediately();
 
     const createPayload = JSON.parse(String(calls[1].init?.body));
-    assert.deepEqual(elementIds(JSON.parse(createPayload.data)), ["progress", "content"]);
+    const created = JSON.parse(createPayload.data);
+    assert.deepEqual(elementIds(created), ["progress_panel", "content"]);
+    // 默认收起，且内层仍是 progress（推送内容的 PUT 路径靠它）
+    assert.equal(created.body.elements[0].expanded, false);
+    assert.equal(created.body.elements[0].elements[0].element_id, "progress");
     await stream.close();
   } finally {
     globalThis.fetch = originalFetch;
@@ -106,7 +110,10 @@ test("清单单独走 elements/progress/content，且 sequence 与正文共享�
       progressEnabled: true,
     });
     await stream.startImmediately();
-    stream.setProgressSource(() => "✅ bash  npm test · 1.2s");
+    stream.setProgressSource(() => ({
+      title: "执行过程（正在执行 bash）",
+      body: "✅ bash  npm test · 1.2s",
+    }));
     // 直接驱动一次 tick：不依赖 120ms 定时器，测试更稳
     await (stream as any).tick();
 
@@ -116,6 +123,14 @@ test("清单单独走 elements/progress/content，且 sequence 与正文共享�
     assert.equal(body.content, "✅ bash  npm test · 1.2s");
     assert.equal(typeof body.sequence, "number");
 
+    // 折叠面板标题单独走 PATCH，partial_element 必须是 JSON 字符串
+    const titlePatch = calls.find((c) => c.url.includes("/elements/progress_panel"));
+    assert.ok(titlePatch, "应当对 progress_panel 发起 PATCH");
+    assert.equal(titlePatch!.init?.method, "PATCH");
+    const patchBody = JSON.parse(String(titlePatch!.init?.body));
+    assert.equal(typeof patchBody.partial_element, "string");
+    assert.equal(JSON.parse(patchBody.partial_element).header.title.content, "执行过程（正在执行 bash）");
+
     // 再推一次相同文本：不应重复 PUT（节流去重）
     const before = calls.filter((c) => c.url.includes("/elements/progress/content")).length;
     await (stream as any).tick();
@@ -123,7 +138,10 @@ test("清单单独走 elements/progress/content，且 sequence 与正文共享�
     assert.equal(after, before);
 
     // 内容变化后才再推，且 sequence 必须更大（飞书要求全卡严格递增）
-    stream.setProgressSource(() => "✅ bash  npm test · 1.2s\n⏳ edit  a.ts");
+    stream.setProgressSource(() => ({
+      title: "执行过程（正在执行 bash）",
+      body: "✅ bash  npm test · 1.2s\n⏳ edit  a.ts",
+    }));
     await (stream as any).tick();
     const puts = calls.filter((c) => c.url.includes("/elements/progress/content"));
     assert.equal(puts.length, before + 1);
@@ -213,7 +231,7 @@ test("收尾整卡超限（200860）时新发一条只带清单的卡，不丢�
       progressEnabled: true,
     });
     await stream.startImmediately();
-    stream.setProgressSource(() => "✅ bash  npm test · 1.2s\n⏳ edit  src/a.ts");
+    stream.setProgressSource(() => ({ title: "执行过程", body: "✅ bash  npm test · 1.2s" }));
     stream.ensureFinal("很长的正文");
     await stream.close("很长的正文", "done");
 
@@ -237,7 +255,7 @@ test("收尾成功时不发兜底卡（回归保护）", async () => {
       progressEnabled: true,
     });
     await stream.startImmediately();
-    stream.setProgressSource(() => "✅ bash  npm test · 1.2s");
+    stream.setProgressSource(() => ({ title: "执行过程", body: "✅ bash  npm test · 1.2s" }));
     await stream.close("正文", "done");
     assert.deepEqual(fallbackCardBodies(calls), []);
   } finally {
@@ -256,7 +274,7 @@ test("超限但没有清单时不发兜底卡（不多刷消息）", async () =>
       progressEnabled: true,
     });
     await stream.startImmediately();
-    stream.setProgressSource(() => "");
+    stream.setProgressSource(() => ({ title: "执行过程", body: "" }));
     await stream.close("正文", "done");
     assert.deepEqual(fallbackCardBodies(calls), []);
   } finally {

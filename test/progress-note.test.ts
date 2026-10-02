@@ -186,25 +186,47 @@ test("abortAll 把所有进行中的行标成已中断（session.abort 不发 en
   assert.equal(t.abortAll(T0 + 6000), 0);
 });
 
-test("CardKit 卡带 progress 元件且排在 content 之前", () => {
+test("CardKit 卡把清单收进折叠面板，且排在 content 之前", () => {
   const card: any = buildCardKitCardJson({
     status: "running",
     body: "正文",
     key: "k1",
     progress: "✅ bash  npm test · 1.2s",
+    progressTitle: "执行过程（正在执行 bash）",
     streaming: true,
   });
   // 运行卡里还有一个停止按钮（不带 element_id），先滤掉
   const ids = card.body.elements.map((e: any) => e.element_id).filter(Boolean);
+  assert.deepEqual(ids, ["progress_panel", "content"]);
+
+  const panel = card.body.elements[0];
+  assert.equal(panel.tag, "collapsible_panel");
+  // 默认收起：50 行清单铺开会把对话淹没
+  assert.equal(panel.expanded, false);
+  assert.match(panel.header.title.content, /正在执行 bash/);
+  // 内层保留 progress 这个 id，推送内容的 PUT 路径才不用变
+  assert.equal(panel.elements[0].element_id, "progress");
+  assert.match(panel.elements[0].content, /npm test/);
+});
+
+test("progressCollapsed=false 时不包折叠面板（action / timeout 档只有一行）", () => {
+  const card: any = buildCardKitCardJson({
+    status: "running",
+    body: "正文",
+    key: "k1",
+    progress: "⏳ bash  npm test",
+    progressCollapsed: false,
+  });
+  const ids = card.body.elements.map((e: any) => e.element_id).filter(Boolean);
   assert.deepEqual(ids, ["progress", "content"]);
-  assert.match(JSON.stringify(card.body.elements[0]), /npm test/);
+  assert.equal(card.body.elements[0].tag, "markdown");
 });
 
 test("progress 传空串时插占位元件（否则后续 PUT 没地方落）", () => {
   const card: any = buildCardKitCardJson({ status: "running", body: "", key: "k1", progress: "" });
   const ids = card.body.elements.map((e: any) => e.element_id).filter(Boolean);
-  assert.deepEqual(ids, ["progress", "content"]);
-  assert.equal(card.body.elements[0].content, " ");
+  assert.deepEqual(ids, ["progress_panel", "content"]);
+  assert.equal(card.body.elements[0].elements[0].content, " ");
 });
 
 test("progress 为 undefined 时不插元件（progressMode=off 零开销）", () => {
@@ -220,7 +242,7 @@ test("终态卡保留定格清单", () => {
     progress: "✅ bash  npm test · 1.2s",
   });
   const ids = card.body.elements.map((e: any) => e.element_id);
-  assert.deepEqual(ids, ["progress", "content"]);
+  assert.deepEqual(ids, ["progress_panel", "content"]);
 });
 
 test("trimProgressToBytes 未超限时原样返回", () => {

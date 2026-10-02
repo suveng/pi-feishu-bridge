@@ -5,6 +5,7 @@
  * running 卡必须带「停止」按钮（与 card-builder 契约一致）。
  */
 import { buildCardKitCardJson, type ReplyCardStatus } from "./card-builder.ts";
+import { ProgressChannel } from "./progress-channel.ts";
 import { byteLength } from "./progress-note.ts";
 import { sendOversizeProgressCard } from "./oversize-progress-card.ts";
 import { debugLog } from "./debug.ts";
@@ -46,6 +47,8 @@ export type CardKitStreamOptions = {
    * 建卡时不留位，后续再想写清单就 PUT 不上去。
    */
   progressEnabled?: boolean;
+  /** 是否把清单收进折叠面板（默认 true；action / timeout 档只有一行，不必收） */
+  progressCollapsed?: boolean;
   /** 记录本 bot 发出的消息 id（供 groupAlsoOnReply） */
   onOutboundMessageId?: (messageId: string) => void;
 };
@@ -54,12 +57,8 @@ export class CardKitStream {
   private cardId: string | null = null;
   private fullText = "";
   private lastSent = "";
-  /** 工具过程清单（element_id: progress），与正文各走一条 PUT */
-  private progressText = "";
-  /** 清单取数回调；tick 时调用，不在事件里直接写 */
-  private progressSource: (() => string) | undefined;
-  /** 上一次成功写上去的清单原文；null = 从未写过 */
-  private lastProgressSent: string | null = null;
+  /** 工具过程清单通道（内容 + 折叠面板标题） */
+  private readonly progress: ProgressChannel;
   private token: string | null = null;
   private tokenExpiry = 0;
   private sequence = 1;
@@ -75,6 +74,7 @@ export class CardKitStream {
   private readonly title?: string;
   private readonly note?: string;
   private readonly progressEnabled: boolean;
+  private readonly progressCollapsed: boolean;
   private readonly onOutboundMessageId?: (messageId: string) => void;
   private readonly appId: string;
   private readonly appSecret: string;
@@ -103,6 +103,15 @@ export class CardKitStream {
     this.title = options?.title;
     this.note = options?.note;
     this.progressEnabled = options?.progressEnabled === true;
+    this.progressCollapsed = options?.progressCollapsed !== false;
+    this.progress = new ProgressChannel({
+      enabled: this.progressEnabled,
+      collapsed: this.progressCollapsed,
+      baseUrl: () => this.baseUrl(),
+      cardId: () => this.cardId ?? undefined,
+      getToken: () => this.getToken(),
+      nextSequence: () => ++this.sequence,
+    });
     this.onOutboundMessageId = options?.onOutboundMessageId;
   }
 
@@ -137,7 +146,9 @@ export class CardKitStream {
         title: this.title,
         note: this.note,
         // 建卡时就留好清单位（此时清单多半还是空的，但后面要往里 PUT）
-        progress: this.progressEnabled ? this.currentProgress() : undefined,
+        progress: this.progressEnabled ? this.progress.snapshot().body : undefined,
+        progressTitle: this.progress.snapshot().title,
+        progressCollapsed: this.progressCollapsed,
         streaming: true,
         printFrequencyMs: this.printFrequencyMs,
         printStep: this.printStep,
@@ -188,6 +199,9 @@ export class CardKitStream {
       this.interval = setInterval(() => {
         void this.tick();
       }, this.pushIntervalMs);
+      // 不吊住进程退出：调用方忘了 close（例如单测里断言先失败）时，
+      // 定时器会让 node 永远不退出，表现为「测试卡住」而不是「测试失败」。
+      (this.interval as { unref?: () => void }).unref?.();
     }
   }
 
@@ -225,81 +239,52 @@ export class CardKitStream {
       this.fullText = text;
     }
   }
-
   /**
-   * 设置过程清单的取数函数。
+   * 设置过程清单的取数函数（转发给 ProgressChannel）。
    *
-   * 用回调而不是一次性的字符串：timeout / action 档的「已执行 Ns」必须随时间长，
+   * 用回调而不是一次性字符串：timeout / action 档的「已执行 Ns」必须随时间长，
    * 而 Pi 在单个工具运行期间不发任何事件，只有 tick 能驱动刷新。
-   * 回调方（ProgressTracker）已把耗时量化到 5 秒粒度，因此文本不会每个 tick 都变。
+   * 回调方已把耗时量化到 5 秒粒度，因此文本不会每个 tick 都变。
    */
-  setProgressSource(source: (() => string) | undefined): void {
-    if (!this.progressEnabled) return;
-    this.progressSource = source;
-  }
-
-  /** 取当前清单文本（回调异常不影响卡片推送） */
-  private currentProgress(): string {
-    if (!this.progressSource) return "";
-    try {
-      return this.progressSource();
-    } catch (e) {
-      debugLog("feishu.cardkit.progress_source_error", {
-        error: e instanceof Error ? e.message : String(e),
-      });
-      return this.progressText;
-    }
+  setProgressSource(source: (() => { title: string; body: string }) | undefined): void {
+    this.progress.setSource(source);
   }
 
   private async tick() {
     if (!this.cardId || this.closed) return;
-    await this.putElementText("content", this.fullText);
-    if (this.progressEnabled) await this.putElementText("progress", this.currentProgress());
+    await this.putContent(this.fullText);
+    if (this.progressEnabled) await this.progress.tick();
   }
 
-  /**
-   * 写入某个元件的文本（全量）。
-   *
-   * content 是正文元件，progress 是过程清单元件 —— 两者只有 URL、空值处理和去重键不同，
-   * 所以合并成一条路径；sequence 也必须是同一个递增计数器
-   * （飞书要求同一张卡上所有操作的 sequence 严格递增）。
-   */
-  private async putElementText(elementId: "content" | "progress", text: string) {
-    if (!this.cardId) return;
-    // 飞书不接受空内容，空清单用一个空格占位
-    const content = elementId === "progress" ? text.trim() || " " : text;
-    // 去重键统一用「实际发出去的 content」：progress 的原文可能带空白，用它比较会重复发送
-    const lastSent = elementId === "progress" ? this.lastProgressSent : this.lastSent;
-    if (content === lastSent) return;
+  /** 写入正文元件（全量文本）；sequence 与进度通道共享同一个递增计数器 */
+  private async putContent(text: string) {
+    if (!this.cardId || text === this.lastSent) return;
     try {
       const t = await this.getToken();
       const seq = ++this.sequence;
       const res = await fetch(
-        `${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}/elements/${elementId}/content`,
+        `${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}/elements/content/content`,
         {
           method: "PUT",
           headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
           body: JSON.stringify({
-            content,
+            content: text,
             sequence: seq,
-            uuid: `${this.cardId}_${elementId}_${seq}`,
+            uuid: `${this.cardId}_content_${seq}`,
           }),
         },
       );
       if (!res.ok) {
-        debugLog("feishu.cardkit.element_error", {
-          elementId,
+        debugLog("feishu.cardkit.update_error", {
           seq,
           status: res.status,
           body: (await res.text()).slice(0, 200),
         });
         return;
       }
-      if (elementId === "progress") this.lastProgressSent = content;
-      else this.lastSent = content;
+      this.lastSent = text;
     } catch (e) {
-      debugLog("feishu.cardkit.element_throw", {
-        elementId,
+      debugLog("feishu.cardkit.update_throw", {
         error: e instanceof Error ? e.message : String(e),
       });
     }
@@ -338,9 +323,9 @@ export class CardKitStream {
 
     try {
       if (firstClose) {
-        await this.putElementText("content", this.fullText);
+        await this.putContent(this.fullText);
         // 清单必须赶在关流式之前写：关掉 streaming_mode 后这条接口就不能再用了
-        if (this.progressEnabled) await this.putElementText("progress", this.currentProgress());
+        if (this.progressEnabled) await this.progress.flush();
         // 给客户端一点时间把剩余字符打完
         await sleep(Math.max(200, this.printFrequencyMs * 4));
         await this.stopStreaming();
@@ -427,7 +412,9 @@ export class CardKitStream {
       title: this.title,
       streaming: false,
       // 终态卡保留定格后的清单，让用户能回看这一轮干了什么
-      progress: this.progressEnabled ? this.currentProgress() : undefined,
+      progress: this.progressEnabled ? this.progress.snapshot().body : undefined,
+      progressTitle: this.progress.snapshot().title,
+      progressCollapsed: this.progressCollapsed,
     });
     const updateRes = await withRetry(() =>
       fetch(`${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}`, {
@@ -451,7 +438,7 @@ export class CardKitStream {
         code: updateJson.code,
         msg: updateJson.msg,
         bodyBytes: byteLength(this.fullText),
-        progressBytes: byteLength(this.currentProgress()),
+        progressBytes: byteLength(this.progress.snapshot().body),
       });
       return false;
     }
@@ -482,7 +469,7 @@ export class CardKitStream {
       runId: this.runId,
       title: this.title,
       finalStatus,
-      progress: this.currentProgress(),
+      progress: this.progress.snapshot().body,
       onOutboundMessageId: this.onOutboundMessageId,
     });
   }

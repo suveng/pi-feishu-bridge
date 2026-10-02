@@ -170,6 +170,8 @@ export class ReplyCard implements ReplyCardSink {
           title: this.title,
           note: this.note,
           progressEnabled: progressNeedsElement(this.streamOpts.progressMode),
+          // steps 档清单可能几十行，收进折叠面板；action / timeout 档只有一行，展开更直接
+          progressCollapsed: this.streamOpts.progressMode === "steps",
           onOutboundMessageId: (id) => {
             this.segmentMessageId = id;
             this.transport.rememberOutboundMessageId?.(id);
@@ -178,7 +180,11 @@ export class ReplyCard implements ReplyCardSink {
       );
       // 清单由 tick 驱动刷新：Pi 在单个工具运行期间不发任何事件，
       // 只有让 CardKitStream 每次 tick 主动取数，timeout 档的「已执行 Ns」才会长。
-      this.cardkit.setProgressSource(() => this.tracker.render() ?? "");
+      // title 是折叠面板收起后唯一能看到的一行，必须跟 body 一起取。
+      this.cardkit.setProgressSource(() => ({
+        title: this.tracker.renderTitle(),
+        body: this.tracker.render() ?? "",
+      }));
       debugLog("feishu.reply_card.cardkit_ready", {
         key: this.key,
         runId: this.runId,

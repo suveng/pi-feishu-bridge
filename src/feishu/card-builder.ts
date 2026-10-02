@@ -49,6 +49,16 @@ export function buildCardKitCardJson(input: {
    * - `""` = 插入空元件（清单还没内容，但后面要 PUT 上去，元件必须先存在）
    */
   progress?: string;
+  /**
+   * 折叠面板标题（收起时唯一能看到的一行，通常是「正在执行 bash · npm test」）。
+   * 仅在 progressCollapsed 为 true 时生效。
+   */
+  progressTitle?: string;
+  /**
+   * 是否把清单收进折叠面板（默认 true）。
+   * steps 档清单很长，必须收起；action / timeout 档本来就一行，展开更直接。
+   */
+  progressCollapsed?: boolean;
   /** 覆盖默认标题；续段用「回复（接上条）」交代上下文 */
   title?: string;
   streaming?: boolean;
@@ -61,9 +71,27 @@ export function buildCardKitCardJson(input: {
   const body = (input.body || "").trim();
   const note = input.note ? normalizeNote(input.note) : undefined;
   // 清单元件必须排在正文之前：CardKit 只支持按 element_id 更新，元件不存在就 PUT 不上去
-  const progressElement = input.progress === undefined
+  const progressMarkdown = input.progress === undefined
     ? undefined
     : { tag: "markdown", content: input.progress.trim() || " ", element_id: "progress" };
+  // 清单默认收进折叠面板：50 行清单直接铺开会把对话淹没。
+  // 内层 markdown 仍叫 progress，所以推送内容的 PUT 路径不受影响。
+  const progressElement = progressMarkdown === undefined
+    ? undefined
+    : input.progressCollapsed === false
+      ? progressMarkdown
+      : {
+          tag: "collapsible_panel",
+          element_id: "progress_panel",
+          // 默认收起；用户自己展开过就保持，不强制改回去
+          expanded: false,
+          header: {
+            title: { tag: "plain_text", content: input.progressTitle || "执行过程" },
+            icon_position: "right",
+            icon_expanded_angle: -180,
+          },
+          elements: [progressMarkdown],
+        };
   const elements: object[] = [];
 
   if (running || input.status === "paused") {
