@@ -14,6 +14,9 @@
  */
 import { debugLog } from "./debug.ts";
 
+/** 兜底清单卡的清单字节上限，给卡片其余部分留足余量 */
+export const OVERSIZE_PROGRESS_BYTES = 8 * 1024;
+
 /** 过程展示档位 */
 export type ProgressMode = "off" | "steps" | "action" | "timeout";
 
@@ -276,4 +279,43 @@ export class ProgressTracker {
 /** 该档位是否需要卡片上预留 progress 元件（off 档不预留，零开销） */
 export function progressNeedsElement(mode: ProgressMode): boolean {
   return mode !== "off";
+}
+
+/** UTF-8 字节数（飞书的卡片体积上限是按字节算的） */
+export function byteLength(text: string): number {
+  return Buffer.byteLength(text, "utf8");
+}
+
+/**
+ * 按 UTF-8 字节上限裁剪清单，**从末尾保留**（最近执行的步骤优先）。
+ *
+ * 用在整卡体积超限后的兜底新卡上：那张卡的体积完全由清单决定，
+ * 不裁就可能又撞一次上限。
+ */
+export function trimProgressToBytes(text: string, maxBytes: number): string {
+  if (!text || maxBytes <= 0) return "";
+  if (byteLength(text) <= maxBytes) return text;
+
+  const lines = text.split("\n");
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const cost = byteLength(lines[i]) + 1; // +1 是换行符
+    if (used + cost > maxBytes) break;
+    kept.unshift(lines[i]);
+    used += cost;
+  }
+  if (kept.length === 0) return cutToBytes(lines[lines.length - 1], maxBytes);
+
+  // 折叠提示行自己也占字节，必须先算进预算里，否则裁完反而超了
+  const build = (keptLines: string[]) =>
+    `… 前 ${lines.length - keptLines.length} 行因卡片体积超限未展示\n${keptLines.join("\n")}`;
+  // 提示行装不下就从头部继续丢；丢到一行不剩就退回硬切（保最后一行，最新的步骤）
+  while (kept.length > 0 && byteLength(build(kept)) > maxBytes) kept.shift();
+  return kept.length > 0 ? build(kept) : cutToBytes(lines[lines.length - 1], maxBytes);
+}
+
+/** 连一行都放不下时的最后手段：按字节硬切（toString 会丢掉不完整的多字节尾部） */
+function cutToBytes(text: string, maxBytes: number): string {
+  return `${Buffer.from(text, "utf8").subarray(0, Math.max(0, maxBytes - 3)).toString("utf8")}…`;
 }

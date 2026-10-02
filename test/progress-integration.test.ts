@@ -12,8 +12,11 @@ import { ReplyCard } from "../src/feishu/reply-card.ts";
 
 type FetchCall = { url: string; init?: RequestInit };
 
-/** 最小飞书 API stub：只认桥接会调的几条路径 */
-function stubFetch(calls: FetchCall[]) {
+/**
+ * 最小飞书 API stub：只认桥接会调的几条路径。
+ * finalCardFails = true 时让「全量更新卡片」返回 200860（卡片体积超限）。
+ */
+function stubFetch(calls: FetchCall[], opts?: { finalCardFails?: boolean }) {
   return async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
@@ -29,11 +32,25 @@ function stubFetch(calls: FetchCall[]) {
     if (url.endsWith("/card-1/settings")) {
       return new Response(JSON.stringify({ code: 0 }));
     }
+    // 整卡全量更新（收尾改标题）—— 超限就报 200860
+    if (url.endsWith("/cardkit/v1/cards/card-1") && init?.method === "PUT") {
+      return opts?.finalCardFails
+        ? new Response(JSON.stringify({ code: 200860, msg: "card size exceed" }))
+        : new Response(JSON.stringify({ code: 0 }));
+    }
     if (url.includes("/cardkit/v1/cards/card-1")) {
       return new Response(JSON.stringify({ code: 0 }));
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
+}
+
+/** 取「发给用户的消息」正文（排除建卡那条 CardKit 引用） */
+function fallbackCardBodies(calls: FetchCall[]): string[] {
+  return calls
+    .filter((c) => c.url.includes("/messages/") && c.init?.method === "POST")
+    .map((c) => String(c.init?.body ?? ""))
+    .filter((b) => b.includes("执行过程"));
 }
 
 function elementIds(card: any): string[] {
@@ -183,4 +200,66 @@ test("progressMode=off 时不采集工具事件、不渲染清单", async () => 
     args: { command: "npm test" },
   });
   assert.equal(card.progressText, "");
+});
+
+test("收尾整卡超限（200860）时新发一条只带清单的卡，不丢执行记录", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: FetchCall[] = [];
+  globalThis.fetch = stubFetch(calls, { finalCardFails: true }) as typeof fetch;
+  try {
+    const stream = new CardKitStream("app", "secret", "feishu", "incoming-1", async () => {}, {
+      conversationKey: "p2p:u",
+      runId: "r1",
+      progressEnabled: true,
+    });
+    await stream.startImmediately();
+    stream.setProgressSource(() => "✅ bash  npm test · 1.2s\n⏳ edit  src/a.ts");
+    stream.ensureFinal("很长的正文");
+    await stream.close("很长的正文", "done");
+
+    const bodies = fallbackCardBodies(calls);
+    assert.equal(bodies.length, 1, "应当新发一条清单卡");
+    assert.match(bodies[0], /npm test/);
+    assert.match(bodies[0], /正文见上一条/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("收尾成功时不发兜底卡（回归保护）", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: FetchCall[] = [];
+  globalThis.fetch = stubFetch(calls) as typeof fetch;
+  try {
+    const stream = new CardKitStream("app", "secret", "feishu", "incoming-1", async () => {}, {
+      conversationKey: "p2p:u",
+      runId: "r1",
+      progressEnabled: true,
+    });
+    await stream.startImmediately();
+    stream.setProgressSource(() => "✅ bash  npm test · 1.2s");
+    await stream.close("正文", "done");
+    assert.deepEqual(fallbackCardBodies(calls), []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("超限但没有清单时不发兜底卡（不多刷消息）", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: FetchCall[] = [];
+  globalThis.fetch = stubFetch(calls, { finalCardFails: true }) as typeof fetch;
+  try {
+    const stream = new CardKitStream("app", "secret", "feishu", "incoming-1", async () => {}, {
+      conversationKey: "p2p:u",
+      runId: "r1",
+      progressEnabled: true,
+    });
+    await stream.startImmediately();
+    stream.setProgressSource(() => "");
+    await stream.close("正文", "done");
+    assert.deepEqual(fallbackCardBodies(calls), []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -5,6 +5,8 @@
  * running 卡必须带「停止」按钮（与 card-builder 契约一致）。
  */
 import { buildCardKitCardJson, type ReplyCardStatus } from "./card-builder.ts";
+import { byteLength } from "./progress-note.ts";
+import { sendOversizeProgressCard } from "./oversize-progress-card.ts";
 import { debugLog } from "./debug.ts";
 import { withRetry } from "./retry.ts";
 
@@ -251,80 +253,53 @@ export class CardKitStream {
 
   private async tick() {
     if (!this.cardId || this.closed) return;
-    if (this.fullText !== this.lastSent) await this.putContent(this.fullText);
-    if (this.progressEnabled) {
-      const text = this.currentProgress();
-      if (text !== this.lastProgressSent) await this.putProgress(text);
-    }
+    await this.putElementText("content", this.fullText);
+    if (this.progressEnabled) await this.putElementText("progress", this.currentProgress());
   }
 
   /**
-   * 写入过程清单元件（全量文本）。
-   * sequence 与正文共享同一个递增计数器：飞书要求同一张卡上所有操作的 sequence 严格递增。
+   * 写入某个元件的文本（全量）。
+   *
+   * content 是正文元件，progress 是过程清单元件 —— 两者只有 URL、空值处理和去重键不同，
+   * 所以合并成一条路径；sequence 也必须是同一个递增计数器
+   * （飞书要求同一张卡上所有操作的 sequence 严格递增）。
    */
-  private async putProgress(text: string) {
-    if (!this.cardId || text === this.lastProgressSent) return;
+  private async putElementText(elementId: "content" | "progress", text: string) {
+    if (!this.cardId) return;
     // 飞书不接受空内容，空清单用一个空格占位
-    const content = text.trim() || " ";
+    const content = elementId === "progress" ? text.trim() || " " : text;
+    // 去重键统一用「实际发出去的 content」：progress 的原文可能带空白，用它比较会重复发送
+    const lastSent = elementId === "progress" ? this.lastProgressSent : this.lastSent;
+    if (content === lastSent) return;
     try {
       const t = await this.getToken();
       const seq = ++this.sequence;
       const res = await fetch(
-        `${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}/elements/progress/content`,
+        `${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}/elements/${elementId}/content`,
         {
           method: "PUT",
           headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
           body: JSON.stringify({
             content,
             sequence: seq,
-            uuid: `${this.cardId}_p${seq}`,
+            uuid: `${this.cardId}_${elementId}_${seq}`,
           }),
         },
       );
       if (!res.ok) {
-        debugLog("feishu.cardkit.progress_error", {
+        debugLog("feishu.cardkit.element_error", {
+          elementId,
           seq,
           status: res.status,
           body: (await res.text()).slice(0, 200),
         });
-      } else {
-        this.lastProgressSent = text;
+        return;
       }
+      if (elementId === "progress") this.lastProgressSent = content;
+      else this.lastSent = content;
     } catch (e) {
-      debugLog("feishu.cardkit.progress_throw", {
-        error: e instanceof Error ? e.message : String(e),
-      });
-    }
-  }
-
-  private async putContent(text: string) {
-    if (!this.cardId || text === this.lastSent) return;
-    try {
-      const t = await this.getToken();
-      const seq = ++this.sequence;
-      const res = await fetch(
-        `${this.baseUrl()}/open-apis/cardkit/v1/cards/${this.cardId}/elements/content/content`,
-        {
-          method: "PUT",
-          headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            content: text,
-            sequence: seq,
-            uuid: `${this.cardId}_${seq}`,
-          }),
-        },
-      );
-      if (!res.ok) {
-        debugLog("feishu.cardkit.update_error", {
-          seq,
-          status: res.status,
-          body: (await res.text()).slice(0, 200),
-        });
-      } else {
-        this.lastSent = text;
-      }
-    } catch (e) {
-      debugLog("feishu.cardkit.update_throw", {
+      debugLog("feishu.cardkit.element_throw", {
+        elementId,
         error: e instanceof Error ? e.message : String(e),
       });
     }
@@ -363,17 +338,17 @@ export class CardKitStream {
 
     try {
       if (firstClose) {
-        if (this.fullText !== this.lastSent) await this.putContent(this.fullText);
+        await this.putElementText("content", this.fullText);
         // 清单必须赶在关流式之前写：关掉 streaming_mode 后这条接口就不能再用了
-        if (this.progressEnabled) {
-          const text = this.currentProgress();
-          if (text !== this.lastProgressSent) await this.putProgress(text);
-        }
+        if (this.progressEnabled) await this.putElementText("progress", this.currentProgress());
         // 给客户端一点时间把剩余字符打完
         await sleep(Math.max(200, this.printFrequencyMs * 4));
         await this.stopStreaming();
       }
-      await this.putFinalCard(finalStatus, note);
+      // putFinalCard 失败意味着卡片会永远停在「回复中」，补一条只带清单的消息
+      if (!(await this.putFinalCard(finalStatus, note))) {
+        await this.sendOversizeFallback(finalStatus);
+      }
     } catch (e) {
       debugLog("feishu.cardkit.close_error", {
         error: e instanceof Error ? e.message : String(e),
@@ -388,7 +363,9 @@ export class CardKitStream {
    */
   async updateFinal(finalStatus: CardKitCardStatus, note?: string): Promise<void> {
     try {
-      await this.putFinalCard(finalStatus, note);
+      if (!(await this.putFinalCard(finalStatus, note))) {
+        await this.sendOversizeFallback(finalStatus);
+      }
     } catch (e) {
       debugLog("feishu.cardkit.full_update_throw", {
         status: finalStatus,
@@ -431,9 +408,12 @@ export class CardKitStream {
     }
   }
 
-  /** 全量更新卡片正文与 header（不做流式收尾，可重复调用） */
-  private async putFinalCard(finalStatus: CardKitCardStatus, note?: string): Promise<void> {
-    if (!this.cardId) return;
+  /**
+   * 全量更新卡片正文与 header（不做流式收尾，可重复调用）。
+   * 返回是否更新成功：失败时调用方要跑兜底流程（整卡超 30KB 时卡片会一直停在「回复中」）。
+   */
+  private async putFinalCard(finalStatus: CardKitCardStatus, note?: string): Promise<boolean> {
+    if (!this.cardId) return false;
     const t = await withRetry(() => this.getToken(), {
       maxRetries: 3,
       label: "feishu.cardkit.close_token",
@@ -470,7 +450,10 @@ export class CardKitStream {
         status: updateRes.status,
         code: updateJson.code,
         msg: updateJson.msg,
+        bodyBytes: byteLength(this.fullText),
+        progressBytes: byteLength(this.currentProgress()),
       });
+      return false;
     }
 
     debugLog("feishu.cardkit.closed", {
@@ -479,6 +462,28 @@ export class CardKitStream {
       finalStatus,
       headerTitle: (finalCard as any).header?.title?.content,
       hasStopButton: JSON.stringify(finalCard).includes("停止"),
+    });
+    return true;
+  }
+
+  /**
+   * 整卡更新失败时的兜底：交给 oversize-progress-card 新发一条只带清单的消息。
+   *
+   * 背景：正文本就是撑爆整卡（≤ 30KB）的主因，而正文用户已经从流式输出里看完了，
+   * 真正丢掉的是「这轮结束了」和清单 —— 用一条体积可控的新消息补回来。
+   */
+  private async sendOversizeFallback(finalStatus: CardKitCardStatus): Promise<void> {
+    if (!this.progressEnabled) return;
+    await sendOversizeProgressCard({
+      baseUrl: this.baseUrl(),
+      getToken: () => this.getToken(),
+      target: this.target,
+      conversationKey: this.conversationKey,
+      runId: this.runId,
+      title: this.title,
+      finalStatus,
+      progress: this.currentProgress(),
+      onOutboundMessageId: this.onOutboundMessageId,
     });
   }
 }

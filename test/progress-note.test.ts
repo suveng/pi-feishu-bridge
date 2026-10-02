@@ -8,10 +8,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   ProgressTracker,
+  byteLength,
   formatDuration,
   formatProgressLine,
   progressNeedsElement,
   summarizeToolArgs,
+  trimProgressToBytes,
 } from "../src/feishu/progress-note.ts";
 import { buildCardKitCardJson } from "../src/feishu/card-builder.ts";
 
@@ -219,4 +221,31 @@ test("终态卡保留定格清单", () => {
   });
   const ids = card.body.elements.map((e: any) => e.element_id);
   assert.deepEqual(ids, ["progress", "content"]);
+});
+
+test("trimProgressToBytes 未超限时原样返回", () => {
+  const text = "✅ bash  npm test · 1.2s";
+  assert.equal(trimProgressToBytes(text, 1024), text);
+});
+
+test("trimProgressToBytes 超限时丢头部、保末尾（最近执行的步骤优先）", () => {
+  const lines = Array.from({ length: 100 }, (_, i) => `✅ bash  cmd-${i}  · 1.0s`);
+  const trimmed = trimProgressToBytes(lines.join("\n"), 200);
+  assert.ok(byteLength(trimmed) <= 200, `超出预算: ${byteLength(trimmed)}`);
+  assert.match(trimmed, /因卡片体积超限未展示/);
+  assert.match(trimmed, /cmd-99/);
+  assert.equal(trimmed.split("\n").includes("✅ bash  cmd-0  · 1.0s"), false);
+});
+
+test("trimProgressToBytes 连一行都放不下时按字节硬切（不切坏多字节字符）", () => {
+  const trimmed = trimProgressToBytes(`✅ 中文命令 ${"测".repeat(200)}`, 50);
+  assert.ok(byteLength(trimmed) <= 50, `超出预算: ${byteLength(trimmed)}`);
+  assert.match(trimmed, /…$/);
+  // 不出现替换字符，说明没把多字节字符切一半
+  assert.equal(trimmed.includes("\uFFFD"), false);
+});
+
+test("trimProgressToBytes 空输入或零预算返回空", () => {
+  assert.equal(trimProgressToBytes("", 100), "");
+  assert.equal(trimProgressToBytes("abc", 0), "");
 });
