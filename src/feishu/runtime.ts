@@ -33,7 +33,13 @@ export type ContextUsage = {
 };
 
 export type StopConversationResult =
-  | { status: "stopped"; message: string; body: string }
+  | {
+      status: "stopped";
+      message: string;
+      body: string;
+      /** 停止时的过程清单；卡片回调要把同样的内容放回响应卡，否则清单会被刷没 */
+      progress?: string;
+    }
   | { status: "not_running"; message: string }
   | { status: "stale"; message: string }
   | { status: "failed"; message: string };

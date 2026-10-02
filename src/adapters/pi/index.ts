@@ -391,7 +391,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   }
 
   pi.registerCommand("feishu", {
-    description: "Feishu/Lark: setup, start, stop, restart, status, debug, autostart, reset, tools on|off",
+    description: "Feishu/Lark: setup, start, stop, restart, status, debug, autostart, reset, tools on|off, progress",
     handler: async (args, ctx) => {
       uiRef = ctx.ui as any;
       const tokens = args.trim().toLowerCase().split(/\s+/, 2);
@@ -528,7 +528,30 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
           );
           return;
         }
-        ctx.ui.notify("可用命令：/feishu setup | start | stop | restart | status | debug | autostart | reset | tools on|off", "info");
+        if (cmd === "progress") {
+          const progressCfg = loadConfig();
+          if (!cmdArg) {
+            ctx.ui.notify(
+              `飞书进度展示：${progressCfg?.progressMode ?? "steps"}`
+              + `（清单上限 ${progressCfg?.progressMaxLines ?? 50} 行，耗时阈值 ${progressCfg?.progressTimeoutSeconds ?? 30}s）\n`
+              + "用法：/feishu progress steps | action | timeout | off",
+              "info",
+            );
+            return;
+          }
+          // 写进 runtime-overrides 白名单：飞书侧 /config progressMode 也能改同一份
+          const progressSet = setRuntimeConfig("progressMode", cmdArg);
+          if (progressSet.ok === false) {
+            ctx.ui.notify(progressSet.error, "error");
+            return;
+          }
+          ctx.ui.notify(
+            `飞书进度展示已设为 ${progressSet.value}（全局生效，下一轮回复起）`,
+            "info",
+          );
+          return;
+        }
+        ctx.ui.notify("可用命令：/feishu setup | start | stop | restart | status | debug | autostart | reset | tools on|off | progress <mode>", "info");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }

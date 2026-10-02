@@ -16,6 +16,9 @@ export const RUNTIME_CONFIG_KEYS = [
   "streamPrintStep",
   "streamPushIntervalMs",
   "messageDelivery",
+  "progressMode",
+  "progressMaxLines",
+  "progressTimeoutSeconds",
 ] as const;
 
 export type RuntimeConfigKey = (typeof RUNTIME_CONFIG_KEYS)[number];
@@ -38,6 +41,18 @@ export type RuntimeConfigView = {
    * - interrupt：立即打断当前生成，用新消息开新一轮
    */
   messageDelivery?: "queue" | "interrupt";
+  /**
+   * 工具执行过程展示档位（默认 steps）：
+   * - off：不展示，等价于改造前
+   * - steps：累积清单（工具名 + 命令 + 耗时 + 成败）
+   * - action：只显示当前这一个工具
+   * - timeout：平时不显示，单个工具超阈值才提示
+   */
+  progressMode?: "off" | "steps" | "action" | "timeout";
+  /** 清单最多保留多少行，超出折叠（默认 50） */
+  progressMaxLines?: number;
+  /** 超过该秒数才显示耗时（默认 30） */
+  progressTimeoutSeconds?: number;
   [key: string]: unknown;
 };
 
@@ -91,6 +106,13 @@ export function parseRuntimeConfigValue(key: string, raw: string): ParseResult {
       }
       return { ok: true, value: text as "queue" | "interrupt" };
     }
+    case "progressMode": {
+      const allowed = ["off", "steps", "action", "timeout"] as const;
+      if (!(allowed as readonly string[]).includes(text)) {
+        return { ok: false, error: "progressMode 仅支持 off | steps | action | timeout" };
+      }
+      return { ok: true, value: text as (typeof allowed)[number] };
+    }
     case "groupAlsoOnReply":
     case "ignoreBotMessages":
     case "streamingReply": {
@@ -108,6 +130,20 @@ export function parseRuntimeConfigValue(key: string, raw: string): ParseResult {
       const n = Number.parseInt(text, 10);
       if (!Number.isFinite(n) || n <= 0) {
         return { ok: false, error: `${key} 必须是正整数` };
+      }
+      return { ok: true, value: n };
+    }
+    case "progressMaxLines": {
+      const n = Number.parseInt(text, 10);
+      if (!Number.isFinite(n) || n < 3 || n > 100) {
+        return { ok: false, error: "progressMaxLines 必须是 3-100 的整数" };
+      }
+      return { ok: true, value: n };
+    }
+    case "progressTimeoutSeconds": {
+      const n = Number.parseInt(text, 10);
+      if (!Number.isFinite(n) || n <= 0) {
+        return { ok: false, error: "progressTimeoutSeconds 必须是正整数" };
       }
       return { ok: true, value: n };
     }
@@ -235,9 +271,13 @@ export function formatRuntimeConfig(cfg: RuntimeConfigView, overrides?: RuntimeO
     `streamPrintStep: ${cfg.streamPrintStep ?? ""}${mark("streamPrintStep")}`,
     `streamPushIntervalMs: ${cfg.streamPushIntervalMs ?? ""}${mark("streamPushIntervalMs")}`,
     `messageDelivery: ${cfg.messageDelivery ?? "queue"}${mark("messageDelivery")}`,
+    `progressMode: ${cfg.progressMode ?? "steps"}${mark("progressMode")}`,
+    `progressMaxLines: ${cfg.progressMaxLines ?? 50}${mark("progressMaxLines")}`,
+    `progressTimeoutSeconds: ${cfg.progressTimeoutSeconds ?? 30}${mark("progressTimeoutSeconds")}`,
     "",
     "修改: /config <key> <value>",
     "也可直接发 /delivery 弹卡片切换 messageDelivery",
+    "progressMode 也可用 Pi 侧 /feishu progress <值> 修改",
     "清除: /config clear <key|all>",
     `可改项: ${RUNTIME_CONFIG_KEYS.join(", ")}`,
   ].join("\n");

@@ -283,12 +283,14 @@ export class HarnessConversationRuntime implements ConversationRuntime {
     active.stopped = true;
     const body = active.status?.bodyText || "";
     await active.status?.stopImmediately("已停止");
+    // 清单在 stopImmediately 里已被标成「已中断」，这里取的是定格后的版本
+    const progress = active.status?.progressText || "";
     try {
       active.agent.cancel({ kind: "user" });
       debugLog("feishu.harness.prompt.abort", { key });
       const message = "已停止";
       await onReply(message);
-      return { status: "stopped", message, body };
+      return { status: "stopped", message, body, progress };
     } catch (error) {
       active.stopped = false;
       debugLog("feishu.harness.prompt.abort_error", { key, error: error instanceof Error ? error.message : String(error) });

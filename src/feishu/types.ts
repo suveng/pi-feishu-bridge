@@ -56,6 +56,16 @@ export type FeishuConfig = {
   streamPrintStep?: number;
   /** 服务端推送 fullText 到 CardKit 的间隔 ms（默认 120） */
   streamPushIntervalMs?: number;
+  /**
+   * 工具执行过程展示档位（默认 steps）。
+   * off 不展示；steps 累积清单；action 只显示当前工具；timeout 超阈值才提示。
+   * 修改方式：飞书 `/config progressMode <值>` 或 Pi `/feishu progress <值>`。
+   */
+  progressMode?: "off" | "steps" | "action" | "timeout";
+  /** 清单最多保留多少行，超出折叠（默认 50） */
+  progressMaxLines?: number;
+  /** 超过该秒数才显示耗时（默认 30） */
+  progressTimeoutSeconds?: number;
   /** @deprecated 兼容旧配置 */
   streamFlushMs?: number;
   streamMinChars?: number;

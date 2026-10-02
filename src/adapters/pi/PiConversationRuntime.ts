@@ -425,12 +425,14 @@ export class PiConversationRuntime implements ConversationRuntime {
     // 先取消选择题：否则 feishu_ask 的等待会一直挂着，本轮收不干净
     await this.cancelPendingAsk(key, "用户点了停止");
     await active.status?.stopImmediately("已停止");
+    // 清单在 stopImmediately 里已被标成「已中断」，这里取的是定格后的版本
+    const progress = active.status?.progressText || "";
     try {
       await active.session.abort();
       debugLog("feishu.prompt.abort", { key });
       const message = "已停止";
       await onReply(message);
-      return { status: "stopped", message, body };
+      return { status: "stopped", message, body, progress };
     } catch (error) {
       active.stopped = false;
       debugLog("feishu.prompt.abort_error", { key, error: error instanceof Error ? error.message : String(error) });

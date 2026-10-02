@@ -12,7 +12,9 @@ import {
   type ReplyCardStatus,
 } from "./card-builder.ts";
 import { CardKitStream, type CardKitTarget } from "./cardkit-stream.ts";
-import { loadConfig, runtimeEnv } from "./config.ts";
+import { ProgressTracker, progressNeedsElement } from "./progress-note.ts";
+import { resolveStreamOptions, type ReplyCardStreamOptions } from "./reply-card-options.ts";
+import { loadConfig } from "./config.ts";
 import { debugLog } from "./debug.ts";
 
 export type { ReplyCardStatus, ReplyCardFinalStatus } from "./card-builder.ts";
@@ -52,6 +54,8 @@ export function resolveCardTarget(route: CardRouteLike): ReplyCardTarget {
 export type ReplyCardSink = {
   readonly runId: string;
   readonly bodyText: string;
+  /** 当前工具执行过程清单（停止回调要把同样的内容放回响应卡，否则清单会被刷没） */
+  readonly progressText: string;
   /** 是否停在「等用户选择」的暂停态（askUser 出临界区前必须为 false） */
   readonly paused: boolean;
   updateFromEvent(event: unknown): void;
@@ -65,15 +69,8 @@ export type ReplyCardSink = {
   resume(): Promise<void>;
 };
 
-export type ReplyCardStreamOptions = {
-  enabled?: boolean;
-  /** CardKit 客户端打印间隔 ms（默认 50） */
-  printFrequencyMs?: number;
-  /** CardKit 每次打印字符数（默认 1） */
-  printStep?: number;
-  /** 服务端推送 fullText 到 CardKit 的间隔 ms（默认 120） */
-  pushIntervalMs?: number;
-};
+/** 转发给外部：卡片流式与过程展示的参数都在 reply-card-options.ts 里解析 */
+export type { ReplyCardStreamOptions } from "./reply-card-options.ts";
 
 type ReplyCardTransport = {
   replyCard(messageId: string, card: object): Promise<string | undefined>;
@@ -85,41 +82,6 @@ type ReplyCardTransport = {
   /** 记录本 bot 出站消息，供 groupAlsoOnReply */
   rememberOutboundMessageId?(messageId: string): void;
 };
-
-function resolveStreamOptions(override?: ReplyCardStreamOptions) {
-  const cfg = loadConfig();
-  return {
-    enabled: override?.enabled ?? cfg?.streamingReply !== false,
-    printFrequencyMs: Math.max(
-      20,
-      override?.printFrequencyMs
-        ?? parseEnvInt("FEISHU_STREAM_PRINT_FREQUENCY_MS")
-        ?? cfg?.streamPrintFrequencyMs
-        ?? 50,
-    ),
-    printStep: Math.max(
-      1,
-      override?.printStep
-        ?? parseEnvInt("FEISHU_STREAM_PRINT_STEP")
-        ?? cfg?.streamPrintStep
-        ?? 1,
-    ),
-    pushIntervalMs: Math.max(
-      50,
-      override?.pushIntervalMs
-        ?? parseEnvInt("FEISHU_STREAM_PUSH_INTERVAL_MS")
-        ?? cfg?.streamPushIntervalMs
-        ?? 120,
-    ),
-  };
-}
-
-function parseEnvInt(name: string): number | undefined {
-  const v = runtimeEnv(name)?.trim();
-  if (!v) return undefined;
-  const n = Number.parseInt(v, 10);
-  return Number.isFinite(n) ? n : undefined;
-}
 
 export class ReplyCard implements ReplyCardSink {
   readonly runId = randomUUID();
@@ -142,6 +104,10 @@ export class ReplyCard implements ReplyCardSink {
   /** 停在「等用户选择」的中间态；askUser 出临界区前必须消掉 */
   get paused() { return this.status === "paused"; }
   private cardkit: CardKitStream | undefined;
+  /** 工具执行过程清单；off 档也建一个但不能渲染，省得到处判空 */
+  private readonly tracker: ProgressTracker;
+  /** 收尾后冻结：轮末还会来事件，不能再改清单，否则定格的执行记录会变 */
+  private trackerFrozen = false;
   private readonly streamOpts: ReturnType<typeof resolveStreamOptions>;
   private readonly key: string;
   private readonly target: ReplyCardTarget;
@@ -158,6 +124,16 @@ export class ReplyCard implements ReplyCardSink {
     this.target = typeof target === "string" ? { replyToMessageId: target } : target;
     this.transport = transport;
     this.streamOpts = resolveStreamOptions(streamOptions);
+    this.tracker = new ProgressTracker({
+      mode: this.streamOpts.progressMode,
+      maxLines: this.streamOpts.progressMaxLines,
+      timeoutSeconds: this.streamOpts.progressTimeoutSeconds,
+    });
+  }
+
+  /** 当前过程清单文本（停止回调里要把同样的内容放回响应卡，否则清单会闪没） */
+  get progressText(): string {
+    return this.tracker.render() ?? "";
   }
 
   get messageId() {
@@ -193,12 +169,16 @@ export class ReplyCard implements ReplyCardSink {
           runId: this.runId,
           title: this.title,
           note: this.note,
+          progressEnabled: progressNeedsElement(this.streamOpts.progressMode),
           onOutboundMessageId: (id) => {
             this.segmentMessageId = id;
             this.transport.rememberOutboundMessageId?.(id);
           },
         },
       );
+      // 清单由 tick 驱动刷新：Pi 在单个工具运行期间不发任何事件，
+      // 只有让 CardKitStream 每次 tick 主动取数，timeout 档的「已执行 Ns」才会长。
+      this.cardkit.setProgressSource(() => this.tracker.render() ?? "");
       debugLog("feishu.reply_card.cardkit_ready", {
         key: this.key,
         runId: this.runId,
@@ -244,8 +224,38 @@ export class ReplyCard implements ReplyCardSink {
     throw new Error("卡片发送目标缺失：既没有 chatId 也没有 replyToMessageId");
   }
 
-  updateFromEvent(_event: unknown) {
-    // 不展示过程
+  /**
+   * 处理 Pi 会话事件，维护工具执行清单（本改造的核心）。
+   *
+   * 只更新内存里的清单状态，不发网络请求：
+   * 卡片推送交给 CardKitStream 的 tick 定时器节流，避免工具密集切换时打爆卡片接口。
+   */
+  updateFromEvent(event: unknown) {
+    if (this.trackerFrozen || this.tracker.mode === "off") return;
+    if (!event || typeof event !== "object") return;
+    const e = event as {
+      type?: string;
+      toolCallId?: string;
+      toolName?: string;
+      args?: unknown;
+      isError?: boolean;
+    };
+    if (e.type === "tool_execution_start") {
+      this.tracker.start(String(e.toolCallId ?? ""), String(e.toolName ?? "tool"), e.args);
+      debugLog("feishu.progress.tool_start", {
+        key: this.key,
+        runId: this.runId,
+        toolCallId: e.toolCallId,
+        toolName: e.toolName,
+        steps: this.tracker.size,
+      });
+      return;
+    }
+    if (e.type === "tool_execution_end") {
+      this.tracker.end(String(e.toolCallId ?? ""), e.isError !== true);
+      return;
+    }
+    // 其余事件（text_delta / message_end 等）与过程清单无关
   }
 
   append(delta: string) {
@@ -389,6 +399,18 @@ export class ReplyCard implements ReplyCardSink {
     const wasPaused = this.status === "paused";
     this.status = status;
     this.note = note ?? defaultFinalNote(status);
+    // 中断兜底（必需）：session.abort() 不保证发出 tool_execution_end，
+    // 不收尾的话用户按了停止，清单还显示 ⏳，看起来仍在跑。
+    // 冻结在 abortAll 之后：轮末残留事件不得再改这份定格的执行记录。
+    if (this.tracker.abortAll() > 0) {
+      debugLog("feishu.reply_card.progress_aborted", {
+        key: this.key,
+        runId: this.runId,
+        status,
+        steps: this.tracker.size,
+      });
+    }
+    this.trackerFrozen = true;
 
     if (this.cardkit) {
       const mapped = status === "failed" ? "failed" : status === "stopped" ? "stopped" : "done";

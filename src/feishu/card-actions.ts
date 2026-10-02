@@ -132,12 +132,14 @@ export function createCardActionHandler(
       });
       // CardKit 流式卡是 schema 2.0；回调必须返回 2.0，否则会 200830/200671
       // body 优先用 cardkit.close() 已写入的累计文本，避免覆盖已输出内容
+      // progress 同理：不带的话，回调返回的卡会把刚看到的执行清单刷没
       return buildCardKitCardJson({
         status,
         body: "body" in result ? result.body : result.message || "已停止",
         key: stopTask.key,
         runId: stopTask.runId,
         streaming: false,
+        progress: "progress" in result ? result.progress : undefined,
       });
     }
 

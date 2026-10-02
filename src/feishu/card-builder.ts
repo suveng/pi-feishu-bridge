@@ -43,6 +43,12 @@ export function buildCardKitCardJson(input: {
   key?: string;
   runId?: string;
   note?: string;
+  /**
+   * 工具执行过程清单（element_id: progress）。
+   * - `undefined` = 不插入该元件（progressMode=off，零开销）
+   * - `""` = 插入空元件（清单还没内容，但后面要 PUT 上去，元件必须先存在）
+   */
+  progress?: string;
   /** 覆盖默认标题；续段用「回复（接上条）」交代上下文 */
   title?: string;
   streaming?: boolean;
@@ -54,12 +60,17 @@ export function buildCardKitCardJson(input: {
   const showStop = running || input.status === "paused";
   const body = (input.body || "").trim();
   const note = input.note ? normalizeNote(input.note) : undefined;
+  // 清单元件必须排在正文之前：CardKit 只支持按 element_id 更新，元件不存在就 PUT 不上去
+  const progressElement = input.progress === undefined
+    ? undefined
+    : { tag: "markdown", content: input.progress.trim() || " ", element_id: "progress" };
   const elements: object[] = [];
 
   if (running || input.status === "paused") {
     const parts: string[] = [];
     if (note) parts.push(note);
     parts.push(body || (running ? WAITING_TEXT : PAUSED_TEXT));
+    if (progressElement) elements.push(progressElement);
     elements.push({
       tag: "markdown",
       content: parts.join("\n\n"),
@@ -69,6 +80,7 @@ export function buildCardKitCardJson(input: {
       elements.push(buildStopButton(input.key, input.runId));
     }
   } else if (input.status === "done") {
+    if (progressElement) elements.push(progressElement);
     elements.push({
       tag: "markdown",
       content: body || " ",
@@ -78,6 +90,7 @@ export function buildCardKitCardJson(input: {
     const parts: string[] = [];
     if (note) parts.push(note);
     if (body) parts.push(body);
+    if (progressElement) elements.push(progressElement);
     elements.push({
       tag: "markdown",
       content: parts.join("\n\n") || " ",
