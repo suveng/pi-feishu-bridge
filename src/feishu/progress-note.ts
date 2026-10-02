@@ -53,10 +53,8 @@ export type ProgressTrackerOptions = {
 
 const DEFAULT_COMMAND_CHARS = 200;
 const DEFAULT_REFRESH_SECONDS = 5;
-/** 折叠面板标题里的命令摘要长度（只一行，不能占满） */
+/** 折叠面板标题里的命令摘要长度（只有一行，不能占满） */
 const TITLE_DETAIL_CHARS = 30;
-/** 工具名补齐宽度，便于竖排扫读 */
-const TOOL_NAME_WIDTH = 7;
 
 /** args 里优先当作「命令」展示的字段（命中即用，避免打印一大坨 JSON） */
 const PREFERRED_ARG_KEYS = [
@@ -121,8 +119,23 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * 行程清单的一行。
+ * 用行内代码包裹一段文本。
+ *
+ * 不只是好看：命令里的 `*` `_` `[` 等 markdown 特殊字符会直接破坏渲染
+ * （`rg -n "*foo*"` 会被吃成斜体），包进代码段才是安全的。
+ */
+export function inlineCode(text: string): string {
+  if (!text) return "";
+  if (!text.includes("`")) return `\`${text}\``;
+  // 内容自带反引号时改用更长界定符 + 两侧空格（CommonMark 规则），否则代码段会被提前闭合
+  return `\`\` ${text} \`\``;
+}
+
+/**
+ * 行程清单的一行（markdown）。
  * 状态判定优先级：已中断 > 进行中 > 失败 > 成功。
+ *
+ * 不再用 padEnd 对齐工具名：加粗后渲染宽度不等，补空格反而参差。
  */
 export function formatProgressLine(entry: ProgressEntry): string {
   const icon = entry.aborted
@@ -132,14 +145,27 @@ export function formatProgressLine(entry: ProgressEntry): string {
       : entry.ok === false
         ? "❌"
         : "✅";
-  const name = entry.toolName.padEnd(TOOL_NAME_WIDTH);
-  const detail = entry.detail ? `  ${entry.detail}` : "";
+  const name = `**${entry.toolName}**`;
+  const detail = entry.detail ? `  ${inlineCode(entry.detail)}` : "";
   const cost = entry.aborted
-    ? " · 已中断"
+    ? "  · 已中断"
     : entry.endedAt != null
-      ? ` · ${formatDuration(entry.endedAt - entry.startedAt)}`
+      ? `  · ${formatDuration(entry.endedAt - entry.startedAt)}`
       : "";
-  return `${icon} ${name}${detail}${cost}`.trimEnd();
+  return `${icon} ${name}${detail}${cost}`;
+}
+
+/**
+ * 把整块清单转成引用块。
+ *
+ * 目的：**展开面板后能和正文一眼分开**。引用块在飞书里带左侧竖线与缩进，
+ * 而清单与正文是两个独立元件、中间没有任何分隔，不缩进就会连成一片。
+ */
+function quoteLines(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => (line.trim() ? `> ${line}` : line))
+    .join("\n");
 }
 
 /**
@@ -224,9 +250,10 @@ export class ProgressTracker {
    */
   render(now: number = Date.now()): string | undefined {
     if (this.opts.mode === "off" || this.entries.length === 0) return undefined;
-    if (this.opts.mode === "steps") return this.renderSteps();
-    if (this.opts.mode === "action") return this.renderAction(now);
-    return this.renderTimeout(now);
+    // 统一加引用前缀：三个档位的输出都要与正文区分开
+    if (this.opts.mode === "steps") return quoteLines(this.renderSteps());
+    if (this.opts.mode === "action") return quoteLines(this.renderAction(now) ?? "") || undefined;
+    return quoteLines(this.renderTimeout(now) ?? "") || undefined;
   }
 
   /** steps：完整累积清单，超出上限时首行 + 折叠计数 + 末尾若干行 */
@@ -252,7 +279,8 @@ export class ProgressTracker {
     if (entry.endedAt != null) return line;
     const elapsed = this.quantizeElapsed(now - entry.startedAt);
     if (elapsed < this.opts.timeoutSeconds * 1000) return line;
-    return `${line}\n└ 耗时 ${formatDuration(elapsed)}`;
+    // 附注行也走统一引用前缀，不在这里手写 `>`
+    return `${line}\n⏱ 耗时 ${formatDuration(elapsed)}`;
   }
 
   /** timeout：平时不显示，单个工具跑过阈值才出现 */
@@ -261,7 +289,7 @@ export class ProgressTracker {
     if (!running) return undefined;
     const elapsed = this.quantizeElapsed(now - running.startedAt);
     if (elapsed < this.opts.timeoutSeconds * 1000) return undefined;
-    return `⚠️ ${running.toolName} 已执行 ${formatDuration(elapsed)}…`;
+    return `⚠️ **${running.toolName}** 已执行 ${formatDuration(elapsed)}…`;
   }
 
   /** 把耗时量化到 refreshSeconds 粒度，避免文本每 tick 都变 */

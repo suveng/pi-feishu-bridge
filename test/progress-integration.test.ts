@@ -180,14 +180,14 @@ test("用户按停止后清单不留 ⏳（abort 不发 tool_execution_end 的�
     toolName: "bash",
     args: { command: "sleep 300" },
   });
-  assert.match(card.progressText, /⏳ bash/);
+  assert.match(card.progressText, /⏳ \*\*bash\*\*/);
 
   await card.finish("stopped");
 
-  assert.match(card.progressText, /⛔ bash/);
+  assert.match(card.progressText, /⛔ \*\*bash\*\*/);
   assert.match(card.progressText, /已中断/);
   assert.doesNotMatch(card.progressText, /⏳/);
-  assert.match(card.progressText, /✅ read/);
+  assert.match(card.progressText, /✅ \*\*read\*\*/);
 });
 
 test("收尾后清单冻结，轮末残留事件不再改动执行记录", async () => {

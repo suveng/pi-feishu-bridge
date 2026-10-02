@@ -11,6 +11,7 @@ import {
   byteLength,
   formatDuration,
   formatProgressLine,
+  inlineCode,
   progressNeedsElement,
   summarizeToolArgs,
   trimProgressToBytes,
@@ -71,6 +72,28 @@ test("formatProgressLine 状态符号优先级：中断 > 进行中 > 失败 > �
   );
 });
 
+test("清单行用 markdown：工具名加粗 + 命令走行内代码", () => {
+  const line = formatProgressLine({
+    toolCallId: "t1",
+    toolName: "bash",
+    detail: 'rg -n "*foo*" src/',
+    startedAt: T0,
+    endedAt: T0 + 1200,
+    ok: true,
+  });
+  assert.equal(line, '✅ **bash**  `rg -n "*foo*" src/`  · 1.2s');
+});
+
+test("inlineCode 把 markdown 特殊字符隔离在代码段里", () => {
+  // 不包代码段的话 *foo* 会被渲染成斜体、_bar_ 会变斜体，命令看不出来
+  assert.equal(inlineCode('rg -n "*foo*" src/'), '`rg -n "*foo*" src/`');
+  assert.equal(inlineCode(""), "");
+});
+
+test("命令自带反引号时用双反引号包裹，代码段不被提前闭合", () => {
+  assert.equal(inlineCode("echo `date`"), "`` echo `date` ``");
+});
+
 test("steps 档渲染累积清单，含工具名、完整命令、耗时", () => {
   const t = tracker("steps");
   t.start("t1", "read", { path: "src/feishu/reply-card.ts" }, T0);
@@ -79,10 +102,10 @@ test("steps 档渲染累积清单，含工具名、完整命令、耗时", () =>
 
   const out = t.render(T0 + 300);
   assert.ok(out);
-  assert.match(out, /✅ read/);
+  assert.match(out, /✅ \*\*read\*\*/);
   assert.match(out, /src\/feishu\/reply-card\.ts/);
   assert.match(out, /· 200ms/);
-  assert.match(out, /⏳ bash/);
+  assert.match(out, /⏳ \*\*bash\*\*/);
   assert.match(out, /rg -n "tool_execution" src\//);
   // 进行中的行不带耗时，避免每 push 都变
   assert.equal(out.split("\n")[1].includes("·"), false);
@@ -93,7 +116,7 @@ test("同一 toolCallId 重复 start 不新增行", () => {
   t.start("t1", "bash", { command: "a" }, T0);
   t.start("t1", "bash", { command: "b" }, T0 + 10);
   assert.equal(t.size, 1);
-  assert.match(t.render(T0)!, /  b/);
+  assert.match(t.render(T0)!, /`b`/);
 });
 
 test("未知 toolCallId 的 end 被忽略，不凭空补行", () => {
@@ -149,14 +172,14 @@ test("action 档无进行中工具时显示最后一个已完成工具", () => {
   t.start("t1", "read", { path: "a.ts" }, T0);
   t.end("t1", true, T0 + 100);
   const out = t.render(T0 + 200)!;
-  assert.match(out, /✅ read/);
+  assert.match(out, /✅ \*\*read\*\*/);
 });
 
 test("timeout 档平时不显示，超阈值才提示已执行多久", () => {
   const t = tracker("timeout");
   t.start("t1", "bash", { command: "npm run build" }, T0);
   assert.equal(t.render(T0 + 1000), undefined);
-  assert.match(t.render(T0 + 31_000)!, /⚠️ bash 已执行/);
+  assert.match(t.render(T0 + 31_000)!, /⚠️ \*\*bash\*\* 已执行/);
   // 工具结束后不再提示
   t.end("t1", true, T0 + 40_000);
   assert.equal(t.render(T0 + 50_000), undefined);
@@ -179,11 +202,43 @@ test("abortAll 把所有进行中的行标成已中断（session.abort 不发 en
 
   assert.equal(t.abortAll(T0 + 5000), 1);
   const out = t.render(T0 + 5000)!;
-  assert.match(out, /✅ read/);
-  assert.match(out, /⛔ bash/);
+  assert.match(out, /✅ \*\*read\*\*/);
+  assert.match(out, /⛔ \*\*bash\*\*/);
   assert.match(out, /已中断/);
   // 二次调用不应重复计数
   assert.equal(t.abortAll(T0 + 6000), 0);
+});
+
+test("清单整块包成引用块，展开后与正文一眼分开", () => {
+  const t = tracker("steps");
+  t.start("t1", "read", { path: "src/a.ts" }, T0);
+  t.end("t1", true, T0 + 200);
+  t.start("t2", "bash", { command: "npm test" }, T0 + 300);
+
+  const lines = t.render(T0 + 300)!.split("\n");
+  assert.equal(lines.length, 2);
+  // 每行都带引用前缀：飞书会渲染成左侧竖线 + 缩进，与正文的平铺段落区分开
+  assert.equal(lines.every((l) => l.startsWith("> ")), true);
+  assert.match(lines[0], /^> ✅ \*\*read\*\*/);
+});
+
+test("action 档的输出同样带引用前缀", () => {
+  const t = tracker("action");
+  t.start("t1", "bash", { command: "npm test" }, T0);
+  const lines = t.render(T0 + 1000)!.split("\n");
+  assert.equal(lines.every((l) => l.startsWith("> ")), true);
+});
+
+test("折叠计数行与其余行一样带引用前缀（不出现双重 > ）", () => {
+  const t = tracker("steps", { maxLines: 4 });
+  for (let i = 0; i < 10; i += 1) {
+    t.start(`t${i}`, "bash", { command: `cmd-${i}` }, T0 + i);
+    t.end(`t${i}`, true, T0 + i + 1);
+  }
+  const lines = t.render(T0 + 20)!.split("\n");
+  assert.equal(lines.every((l) => l.startsWith("> ")), true);
+  assert.equal(lines.some((l) => l.startsWith("> > ")), false);
+  assert.match(lines[1], /中间 \d+ 步已折叠/);
 });
 
 test("CardKit 卡把清单收进折叠面板，且排在 content 之前", () => {
