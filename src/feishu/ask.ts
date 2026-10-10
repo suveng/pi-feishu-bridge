@@ -10,7 +10,10 @@
  */
 import { debugLog } from "./debug.ts";
 
-/** 选项：label 要短（按钮上显示），description 用来解释取舍（卡片正文显示） */
+/**
+ * 选项：label 要短（按钮上显示，用业务词），description 写这道选项的好处与坏处
+ * （各一句，卡片正文显示）。非技术类需求一律业务语言，不带 proto 字段名 / 表名 / 函数名。
+ */
 export type AskOption = {
   label: string;
   description?: string;

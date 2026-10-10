@@ -992,19 +992,28 @@ export class PiConversationRuntime implements ConversationRuntime {
       promptSnippet: "Ask the user multiple-choice questions as clickable Feishu card buttons.",
       promptGuidelines: [
         "Replying through Feishu and the user must choose between options: call feishu_ask, do not list options as plain text.",
-        "Keep option labels short (<= 10 chars); put the trade-off explanation into description.",
+        "Keep option labels short (<= 10 chars) and in business wording; every option's description MUST give its pros and cons in one line each (「好处：…；坏处：…」). Non-technical requests MUST be phrased in business language — no proto field / table / function names.",
         "At most 4 questions per call; each question gets 2-4 options.",
         "Ask everything you need in ONE call (up to 4 questions). Ask again later only when the next question truly depends on the previous answer.",
       ],
       parameters: Type.Object({
         questions: Type.Array(
           Type.Object({
-            header: Type.String({ description: "Short label, <= 16 chars, e.g. 货币范围" }),
-            question: Type.String({ description: "Full question text" }),
+            header: Type.String({ description: "短标题，<= 16 字，如「货币范围」" }),
+            question: Type.String({
+              description:
+                "完整问题。业务类需求用业务语言（不写 proto 字段名 / 表名 / 函数名）；"
+                + "技术口径题可保留技术名，但必须附一句业务影响",
+            }),
             options: Type.Array(
               Type.Object({
-                label: Type.String({ description: "Short label shown on the button (<= 10 chars)" }),
-                description: Type.Optional(Type.String({ description: "One-line explanation of this option" })),
+                label: Type.String({ description: "按钮上的短标签（<= 10 字），用业务词，如「发奖赠送」" }),
+                description: Type.Optional(
+                  Type.String({
+                    description:
+                      "这道选项的好处与坏处，各一句，形如「好处：…；坏处：…」；推荐项要注明「推荐」",
+                  }),
+                ),
               }),
               { minItems: 2, maxItems: 4 },
             ),
