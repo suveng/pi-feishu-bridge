@@ -24,7 +24,7 @@ import type { LearnApprovalConfig } from "./types.ts";
 /** 审批状态（对外统一口径；未知值一律按在途处理，避免误判成「已通过」） */
 export type LearnApprovalStatus = "PENDING" | "APPROVED" | "REJECTED" | "CANCELED" | "TIMEOUT";
 
-/** 等审批的默认超时：10 分钟，与 feishu_ask 选择题超时保持一致 */
+/** 等审批的默认超时：10 分钟（查询式询问，一个实例超时不影响 feishu_ask 的等待） */
 export const LEARN_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** 轮询间隔默认 5 秒（审批查询接口限频 100 次/分钟，够用） */

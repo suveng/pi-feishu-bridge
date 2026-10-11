@@ -1,13 +1,13 @@
 /**
  * feishu_ask 选择题卡片的结算与「迟到点击」处理。
  *
- * 回归背景：超时/答完后再点同一张卡，旧实现是「静默丢弃」——卡片不刷新、
+ * 回归背景：结算后再点同一张卡，旧实现是「静默丢弃」——卡片不刷新、
  * 也没有任何提示，用户看到的是点了没反应的僵尸卡片。这里把那条路径钉住。
+ * 另：选择题**不自动超时**，挂多久都必须等用户点（见「不自动超时」用例）。
  */
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import {
-  ASK_TIMEOUT_MS,
   answerAsk,
   buildAskCard,
   cancelAsk,
@@ -87,47 +87,27 @@ test("答完后再点同一张卡：返回已结算（done），且不覆盖已�
   );
 });
 
-test("超时：调用 onTimeout 钩子并带上卡片消息 ID，迟到点击得到 timeout 终态", (t) => {
+test("不自动超时：挂满一天也不结算，之后的点击仍然有效", (t) => {
   mock.timers.enable({ apis: ["setTimeout"] });
   t.after(() => mock.timers.reset());
 
-  const seen: { askId: string; cardMessageId?: string; answered: number }[] = [];
-  let outcome;
-  const record = registerAsk(
-    "group:test",
-    twoQuestions(),
-    (value) => {
-      outcome = value;
-    },
-    {
-      onTimeout: (settled) => {
-        seen.push({
-          askId: settled.askId,
-          cardMessageId: settled.cardMessageId,
-          answered: settled.answers.filter(Boolean).length,
-        });
-      },
-    },
-  );
+  let outcome: any;
+  const record = registerAsk("group:test", twoQuestions(), (value) => {
+    outcome = value;
+  });
   setAskCardMessage(record.askId, "om_card_button");
   answerAsk(record.askId, 1, "全量推进");
 
-  mock.timers.tick(ASK_TIMEOUT_MS);
-
-  assert.equal(seen.length, 1, "超时必须触发一次卡片刷新钩子");
-  assert.equal(seen[0].askId, record.askId);
-  assert.equal(seen[0].cardMessageId, "om_card_button");
-  assert.equal(seen[0].answered, 1, "钩子要拿到已答部分");
-  assert.equal((outcome as any).timedOut, true);
-  assert.deepEqual(
-    (outcome as any).answers.map((answer: any) => answer.chosen),
-    [undefined, "全量推进"],
-  );
+  // 用户一直没点：卡片必须停在「等待选择」，不许替他把未作答当成决定
+  mock.timers.tick(24 * 60 * 60 * 1000);
+  assert.equal(outcome, undefined, "任何时长都不允许自动结算");
+  assert.equal(getAsk(record.askId)?.askId, record.askId, "提问仍在待答表里");
 
   const late = answerAsk(record.askId, 0, "推进开发");
-  assert.equal(late.settled, true);
-  assert.equal(late.settledStatus, "timeout", "超时后的点击必须报 timeout，才能给用户提示");
-  assert.equal(late.accepted, false);
+  assert.equal(late.accepted, true, "等一天之后的点击依然生效");
+  assert.equal(late.allAnswered, true);
+  assert.equal(outcome.timedOut, false);
+  assert.deepEqual(outcome.answers.map((answer: any) => answer.chosen), ["推进开发", "全量推进"]);
 });
 
 test("cancelAsk 后点击：终态为 canceled（区别于超时）", () => {

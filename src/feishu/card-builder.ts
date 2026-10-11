@@ -66,7 +66,7 @@ export function buildCardKitCardJson(input: {
   printStep?: number;
 }) {
   const running = input.status === "running";
-  // 暂停等选择时必须保留停止按钮：否则用户只能干等 10 分钟超时，无法中止这一轮
+  // 暂停等选择时必须保留停止按钮：否则用户只能干等（选择题不自动超时），无法中止这一轮
   const showStop = running || input.status === "paused";
   const body = (input.body || "").trim();
   const note = input.note ? normalizeNote(input.note) : undefined;

@@ -63,8 +63,7 @@ type AskRecord = {
   questions: AskQuestion[];
   answers: (string | undefined)[];
   resolve: (outcome: AskOutcome) => void;
-  timer?: NodeJS.Timeout;
-  /** 提问卡片的消息 ID；超时后原地刷新同一张卡时用 */
+  /** 提问卡片的消息 ID；取消后原地刷新同一张卡时用 */
   cardMessageId?: string;
 };
 
@@ -74,12 +73,13 @@ export type AskSettleStatus = "done" | "timeout" | "canceled";
 /** 已结算的提问记录，用于给「迟到的点击」一个明确答复 */
 type SettledAsk = { record: AskRecord; status: AskSettleStatus };
 
-/** 等用户点击的最长时间；超时后把已答部分交回模型，避免整轮卡死 */
-export const ASK_TIMEOUT_MS = 10 * 60 * 1000;
+// 选择题**不设自动超时**：卡片一直停在「等待选择」，直到用户点选 / 自由输入，
+// 或被主动取消（停止按钮、被新消息打断、卡片发送失败）。
+// 用户没作答时绝不替他定默认值——宁可整轮停在那里等他点。
 
 /**
  * 已结算记录的保留时长。
- * 超时后用户往往还会再点几下，这段时间内必须还能回答他「这个提问已经结束了」，
+ * 结算后用户往往还会再点几下，这段时间内必须还能回答他「这个提问已经结束了」，
  * 否则卡片上的按钮看起来能用、点下去却毫无反应（僵尸卡片）。
  */
 const SETTLED_TTL_MS = 30 * 60 * 1000;
@@ -234,17 +234,16 @@ export function buildAskCard(
   };
 }
 
-/** 超时钩子：让调用方能在超时后把卡片原地刷成「已超时」 */
-export type AskHooks = {
-  onTimeout?: (record: AskRecord) => void;
-};
-
-/** 登记一次提问，返回 askId；超时自动结算 */
+/**
+ * 登记一次提问，返回 askId。
+ *
+ * 这里**不挂任何定时器**：提问只有三种收场方式——全部答完、被主动取消、卡片发送失败。
+ * 没有「等太久自动按未作答结算」这条路：用户还没点，模型就不许往下走。
+ */
 export function registerAsk(
   key: string,
   questions: AskQuestion[],
   resolve: (outcome: AskOutcome) => void,
-  hooks: AskHooks = {},
 ): AskRecord {
   const askId = `ask_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const record: AskRecord = {
@@ -254,24 +253,6 @@ export function registerAsk(
     answers: questions.map(() => undefined),
     resolve,
   };
-  record.timer = setTimeout(() => {
-    const current = pendingAsks.get(askId);
-    if (!current) return;
-    pendingAsks.delete(askId);
-    debugLog("feishu.ask.timeout", { askId, key, answered: current.answers.filter(Boolean).length });
-    rememberSettled(current, "timeout");
-    try {
-      hooks.onTimeout?.(current);
-    } catch (error) {
-      debugLog("feishu.ask.timeout_hook_failed", {
-        askId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-    current.resolve(toOutcome(current, { timedOut: true }));
-  }, ASK_TIMEOUT_MS);
-  // 定时器不该拖住进程退出
-  record.timer.unref?.();
   pendingAsks.set(askId, record);
   return record;
 }
@@ -334,7 +315,6 @@ export function answerAsk(
   const allAnswered = record.answers.every(Boolean);
   if (allAnswered) {
     pendingAsks.delete(askId);
-    if (record.timer) clearTimeout(record.timer);
     rememberSettled(record, "done");
     debugLog("feishu.ask.answered", { askId, key: record.key, label: value, custom: allowCustom, allAnswered: true });
     record.resolve(toOutcome(record));
@@ -356,7 +336,6 @@ export function cancelAsk(askId: string, timedOut = false) {
   const record = pendingAsks.get(askId);
   if (!record) return;
   pendingAsks.delete(askId);
-  if (record.timer) clearTimeout(record.timer);
   rememberSettled(record, timedOut ? "timeout" : "canceled");
   record.resolve(toOutcome(record, timedOut ? { timedOut: true } : { canceled: true }));
 }
@@ -371,7 +350,6 @@ export function failAsk(askId: string) {
   const record = pendingAsks.get(askId);
   if (!record) return;
   pendingAsks.delete(askId);
-  if (record.timer) clearTimeout(record.timer);
   rememberSettled(record, "canceled");
   record.resolve(toOutcome(record, { sendFailed: true }));
 }
@@ -380,8 +358,8 @@ export function failAsk(askId: string) {
  * 取消某个会话里所有待答提问（停止按钮 / 被新消息打断）。
  * 返回被取消的记录（含 cardMessageId），调用方拿它把卡片刷成「提问已结束」。
  *
- * 为什么要主动取消：`session.abort()` 不会解除 `feishu_ask` 的等待，那个 Promise
- * 会一直挂到 10 分钟超时，期间整轮无法真正收尾。
+ * 为什么要主动取消：`session.abort()` 不会解除 `feishu_ask` 的等待，而选择题又不再自动超时，
+ * 不主动取消那个 Promise 就会一直挂着，整轮永远收不干净。
  */
 export function cancelAskBySession(key: string, timedOut = false): AskRecord[] {
   const canceled: AskRecord[] = [];

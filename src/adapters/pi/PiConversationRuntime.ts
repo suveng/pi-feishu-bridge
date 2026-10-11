@@ -21,7 +21,6 @@ import type { FeishuState } from "../../feishu/types.ts";
 import type { ConversationRuntime, ConversationStatus, ContextUsage, RuntimeModel, StopConversationResult, ConversationTimeouts } from "../../feishu/runtime.ts";
 import type { FeishuUiNotifyPayload } from "../../feishu/ui-notify.ts";
 import {
-  ASK_TIMEOUT_MS,
   buildAskCard,
   cancelAskBySession,
   failAsk,
@@ -163,29 +162,12 @@ export class PiConversationRuntime implements ConversationRuntime {
     this.cwd = cwd;
     this.bridge = bridge;
     this.timeouts = timeouts;
-    this.warnOnAskTimeoutConflict();
     ensureRoot();
     this.state = readJson<FeishuState>(STATE_PATH, { sessions: {} });
     this.state.sessions ||= {};
     this.state.models ||= {};
     this.state.workspaces ||= {};
     this.loadSettingsDefault();
-  }
-
-  /**
-   * 启动时检查「硬超时」与「选择题等待时长」的关系。
-   * 等待期间硬超时会顺延（见 withTimeout 的 isPaused），这里是给配置者的一条提醒，
-   * 避免把 promptTimeoutSec 设得比 ASK_TIMEOUT_MS 还小时误以为整轮会被卡死。
-   */
-  private warnOnAskTimeoutConflict() {
-    const sec = this.timeouts.promptTimeoutSec;
-    if (typeof sec !== "number" || !Number.isFinite(sec) || sec <= 0) return;
-    if (sec * 1000 >= ASK_TIMEOUT_MS) return;
-    debugLog("feishu.prompt.ask_timeout_conflict", {
-      promptTimeoutSec: sec,
-      askTimeoutSec: Math.round(ASK_TIMEOUT_MS / 1000),
-      note: "promptTimeoutSec 小于选择题等待时长；等待期间硬超时会顺延，但建议设 0 或大于 askTimeoutSec",
-    });
   }
 
   /** Read global settings default model for fallback in getSelectedModel. */
@@ -327,7 +309,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     debugLog("feishu.prompt.interrupted_by_new_message", { key, runId: active.runId });
     active.stopped = true;
     // 先取消挂着的选择题：session.abort() 不会解除 feishu_ask 的等待，
-    // 不取消的话那个 Promise 会挂到 10 分钟超时，暂停卡也一直停在「等你选择」
+    // 而选择题不自动超时，不取消的话那个 Promise 会一直挂着，暂停卡也一直停在「等你选择」
     await this.cancelPendingAsk(key, "被新消息打断");
     try {
       await active.status?.stopImmediately("已被新消息打断");
@@ -840,7 +822,7 @@ export class PiConversationRuntime implements ConversationRuntime {
 
   /**
    * 发一张选择题卡片给「发起这次提问的会话」，并等用户点击。
-   * 全部答完 → 返回答案；超时 → 返回已答部分（timedOut=true），不把整轮卡死。
+   * 全部答完 → 返回答案；**不设自动超时**，用户不点就一直等（被新消息/停止打断时才取消）。
    *
    * key 必须由调用方（工具闭包）显式传入：activeTurnKeys 是所有会话共用的栈顶，
    * 私聊/群聊并发时会取到别的会话，导致卡片发错聊天（跨会话串台）。
@@ -861,23 +843,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     let outcome: AskOutcome | undefined;
     try {
       outcome = await new Promise<AskOutcome>((resolve) => {
-        const record = registerAsk(key, questions, resolve, {
-          // 超时后必须把卡片原地刷成「已超时」：否则卡片还带着按钮，
-          // 用户再点只会被判为「迟到的点击」，而他看到的是一张「还在等你选」的卡。
-          onTimeout: (settled) => {
-            const timeoutUpdater = this.askCardUpdater;
-            const cardMessageId = settled.cardMessageId;
-            if (!timeoutUpdater || !cardMessageId) return;
-            void timeoutUpdater(cardMessageId, buildAskCard(settled.askId, settled.questions, settled.answers, "timeout"))
-              .catch((error) => {
-                debugLog("feishu.ask.timeout_card_failed", {
-                  askId: settled.askId,
-                  key,
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              });
-          },
-        });
+        const record = registerAsk(key, questions, resolve);
         const askCard = buildAskCard(record.askId, questions, record.answers, "pending", history);
         // 每次都平铺新卡，绝不复用旧卡原地改写。
         // 回归背景：本轮第一次提问作答后 resume 会开出一段新回复卡，此时若把第二次
@@ -891,7 +857,7 @@ export class PiConversationRuntime implements ConversationRuntime {
         const send = sender(key, askCard);
         void send
           .then((messageId) => {
-            // 回填卡片消息 ID，超时刷卡片时要用
+            // 回填卡片消息 ID，取消刷卡片时要用
             if (!messageId) return;
             setAskCardMessage(record.askId, messageId);
           })
