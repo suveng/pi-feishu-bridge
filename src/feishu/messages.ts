@@ -225,9 +225,28 @@ export function getCommandList(): string {
   ].join("\n");
 }
 
+/**
+ * 「谁提的」标记：桥接把本条消息的发送者身份作为**固定首行**注入 prompt。
+ *
+ * 用途：`/req 新` 建需求时把 open_id 落进 `manifest.json` 的 `requester`（提出人），
+ * 否则需求池里的需求事后完全查不出是谁提的（见 `.pi/extensions/knowledge-flow/index.ts`
+ * 的 `kb_need_create` 与 `prompts/需求-命名.md` 第 1 步）。
+ *
+ * 口径：群聊里这个 open_id 只是**本条消息的发送者**（同一需求可能多人接话），
+ * 不等于「需求提出人」——流程侧按「拿不到就写未记录、不许猜」处理。
+ * 缺字段时用「未知」占位，但标记行**必须始终存在且形状不变**（流程靠它做字符串匹配）。
+ */
+export function buildRequesterMarker(openId?: string, chatType?: string): string {
+  const id = openId?.trim() || "未知";
+  const type = chatType?.trim() || "未知";
+  return `[飞书提出人] open_id=${id} chat_type=${type}`;
+}
+
 /** 合并用户文本与引用父消息，供 agent 调查告警卡片等场景 */
 export function buildPromptWithQuote(userText: string, quoted?: { msgType: string; text: string } | null): string {
   if (!quoted?.text?.trim()) return userText;
+  // 引用块**只带正文**，不带引用消息的发送者：否则「提出人」会被引用者身份污染
+  // （引用别人的话去提需求，会被记成那个人的需求）。
   const blocks = [
     "[Quoted message]",
     `type: ${quoted.msgType}`,

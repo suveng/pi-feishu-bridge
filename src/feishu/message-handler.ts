@@ -10,7 +10,7 @@ import {
   getRuntimeOverrides,
   setRuntimeConfig,
 } from "./runtime-config.ts";
-import { conversationKey, conversationLabel, buildPromptWithQuote, getCommandList, normalizeForDedupe, parseBotCommand, parseMessageInput, pruneRecentMap, stripRerunMarker, textSimilarity, NEAR_DUPLICATE_THRESHOLD } from "./messages.ts";
+import { conversationKey, conversationLabel, buildPromptWithQuote, buildRequesterMarker, getCommandList, normalizeForDedupe, parseBotCommand, parseMessageInput, pruneRecentMap, stripRerunMarker, textSimilarity, NEAR_DUPLICATE_THRESHOLD } from "./messages.ts";
 import { ReplyCard, resolveCardTarget } from "./reply-card.ts";
 import type { FeishuBridgeStore } from "./bridge-store.ts";
 import type { FeishuTransport } from "./transport.ts";
@@ -537,7 +537,7 @@ export class FeishuMessageHandler {
   }
 }
 
-function buildPrompt(
+export function buildPrompt(
   msg: FeishuMessage,
   text: string,
   fileSections: string[],
@@ -562,8 +562,13 @@ function buildPrompt(
   }
 
   const promptBody = contentParts.join("\n\n").trim();
+  // 首行固定标记（谁提的）：**必须放在正文之前**，且只在此处注入 ——
+  // 不要塞进 buildPromptWithQuote 的引用块（那会把引用者的身份当成提出人）。
+  const marked = [buildRequesterMarker(msg.senderOpenId, msg.chatType), promptBody]
+    .filter(Boolean)
+    .join("\n");
   const label = conversationLabel(msg);
-  return label ? `${label} ${promptBody}` : promptBody;
+  return label ? `${label} ${marked}` : marked;
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
