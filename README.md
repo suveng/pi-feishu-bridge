@@ -384,6 +384,10 @@ Windows PATH 加入 C:\Program Files\Git\bin
 确需在本目录临时接管时，设 `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`，或在本目录手动 `/feishu restart`
 （手动命令不受本保护限制，并会把这目录更新为新的属主）。
 
+**扫码改道（0.5.3）**：在上述「外来目录」里扫码建应用或保存配置时，凭证**自动写进本目录的实例目录**
+`<本目录>/.pi/feishu/config.pi.json`，**不覆盖全局配置**，并提示用 `./.pi/pi-feishu.sh` 启动。
+所以哪怕是裸开进去扫码的，主工作区的机器人也不会被换掉。
+
 隔离方式是给每个额外实例设一个数据目录：
 
 ```bash

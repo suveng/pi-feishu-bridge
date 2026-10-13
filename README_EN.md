@@ -373,6 +373,8 @@ The hot-updatable scope only includes `groupPolicy`, `groupKeywords`, `groupAlso
 
 To take over temporarily in this directory, set `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`, or run `/feishu restart` manually here (manual commands bypass this protection and update the owner record).
 
+**QR setup redirect (0.5.3)**: in such a foreign directory, creating a bot by QR code (or saving the config) writes the credentials to **this directory's own instance directory** `<cwd>/.pi/feishu/config.pi.json` instead of overwriting the global config, and tells you to start with `./.pi/pi-feishu.sh`. So even a bare-started QR setup will not swap out the primary workspace's bot.
+
 Isolation is done by giving each extra instance its own data directory:
 
 ```bash

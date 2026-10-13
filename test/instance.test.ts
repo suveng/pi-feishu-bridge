@@ -15,7 +15,9 @@ import {
   resolveHarnessRoot,
   resolveInstanceDir,
   resolveRootDir,
+  workspaceInstanceDir,
 } from "../src/feishu/instance.ts";
+import { resolveConfigWriteTarget } from "../src/feishu/config.ts";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -158,6 +160,33 @@ test("属主工作区记录：写入后可读回，落在实例根目录，损�
     // 空 cwd 字段 → undefined
     writeFileSync(ownerWorkspacePath(env), JSON.stringify({ cwd: "  " }), "utf8");
     assert.equal(readOwnerWorkspace(env), undefined);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("扫码改道：属主在别处 → 凭证写本目录实例，不碰全局（0.5.3）", () => {
+  const other = "/Users/a/proj";
+  const mine = "/Users/a/other";
+  // 判定：本目录实例目录
+  assert.equal(workspaceInstanceDir(mine, {}, other), join(mine, ".pi", "feishu"));
+  // 落点：本目录实例的 config.pi.json + 带 redirectedDir（调用方据此提示用启动器）
+  const target = resolveConfigWriteTarget(mine, {}, other);
+  assert.equal(target.path, join(mine, ".pi", "feishu", "config.pi.json"));
+  assert.equal(target.redirectedDir, join(mine, ".pi", "feishu"));
+  // 主工作区自己 / 已隔离 / 显式放行 → 都不改道，仍写全局
+  assert.equal(resolveConfigWriteTarget("/Users/a/proj", {}, "/Users/a/proj").path, join(DEFAULT_ROOT_DIR, "config.pi.json"));
+  assert.equal(resolveConfigWriteTarget(mine, { FEISHU_DATA_DIR: "/tmp/inst-b" }, other).path, join(DEFAULT_ROOT_DIR, "config.pi.json"));
+  assert.equal(resolveConfigWriteTarget(mine, { FEISHU_ALLOW_FOREIGN_WORKSPACE: "1" }, other).path, join(DEFAULT_ROOT_DIR, "config.pi.json"));
+});
+
+test("扫码改道：没有属主记录但本目录已有 .pi/feishu → 也改道", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "feishu-redirect-"));
+  const base = realpathSync(tmp); // macOS 的 /var 是 /private/var 的软链，比较前先归一化
+  try {
+    assert.equal(workspaceInstanceDir(tmp, {}, undefined), undefined, "没有实例目录时照常写全局");
+    mkdirSync(join(tmp, ".pi", "feishu"), { recursive: true });
+    assert.equal(workspaceInstanceDir(tmp, {}, undefined), join(base, ".pi", "feishu"));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync, 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseGroupKeywords } from "./group-trigger.ts";
-import { instanceWebhookPort, resolveHarnessRoot, resolveRootDir } from "./instance.ts";
+import { instanceWebhookPort, readOwnerWorkspace, resolveHarnessRoot, resolveRootDir, workspaceInstanceDir } from "./instance.ts";
 import { applyRuntimeOverrides, getRuntimeOverrides, setRuntimeOverridesPath } from "./runtime-config.ts";
 import type { CardActionMode, Domain, FeishuConfig, GroupPolicy, LearnApprovalConfig } from "./types.ts";
 
@@ -180,6 +180,22 @@ export function ensureRoot() {
   }
   mkdirSync(ROOT_DIR, { recursive: true });
   migrateLegacyFiles();
+}
+
+/**
+ * 写配置时的实际落点：默认全局 `CONFIG_PI_PATH`；若本目录不是这份全局实例的属主工作区
+ * （典型场景：在另一个工作区里扫码建应用），则改道到本目录的实例目录，
+ * 避免把主工作区的机器人配置覆盖掉。
+ * 返回值里的 `redirectedDir` 非空时，调用方应提示用户用 `./.pi/pi-feishu.sh` 启动。
+ */
+export function resolveConfigWriteTarget(
+  cwd: string = process.cwd(),
+  env: NodeJS.ProcessEnv = process.env,
+  recordedOwnerCwd: string | null | undefined = readOwnerWorkspace(env),
+): { path: string; redirectedDir?: string } {
+  const dir = workspaceInstanceDir(cwd, env, recordedOwnerCwd);
+  if (!dir) return { path: CONFIG_PI_PATH };
+  return { path: join(dir, "config.pi.json"), redirectedDir: dir };
 }
 
 /**

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -115,6 +115,35 @@ export function isForeignWorkspace(
   const owners = [ownerCwd, recordedOwnerCwd].filter((value): value is string => Boolean(value?.trim()));
   if (owners.length === 0) return false;
   return owners.some((owner) => normalizeDir(owner) !== mine);
+}
+
+/** 工作区本地实例目录名（相对工作区根目录）：`<workspace>/.pi/feishu`。 */
+export const WORKSPACE_INSTANCE_SUBPATH = join(".pi", "feishu");
+
+/**
+ * 「保存配置」时的改道判定（0.5.3）：未做实例隔离、本目录又不是这份全局实例的属主工作区时，
+ * 返回**本目录的实例目录** —— 调用方应把凭证写进去，而不是覆盖全局 `config.pi.json`。
+ *
+ * 起因：在那样的目录里扫码建应用，向导会把新机器人写进全局配置，
+ * 等于把主工作区的机器人换掉（主工作区会突然连不上）。
+ *
+ * 返回 `undefined` = 照常写全局。
+ */
+export function workspaceInstanceDir(
+  cwd: string = process.cwd(),
+  env: NodeJS.ProcessEnv = process.env,
+  recordedOwnerCwd?: string | null,
+): string | undefined {
+  if (resolveInstanceDir(env)) return undefined;
+  if (env.FEISHU_ALLOW_FOREIGN_WORKSPACE === "1") return undefined;
+  const mine = normalizeDir(cwd);
+  const dir = join(mine, WORKSPACE_INSTANCE_SUBPATH);
+  const owner = recordedOwnerCwd?.trim();
+  // 属主明确在别的目录 → 改道
+  if (owner && normalizeDir(owner) !== mine) return dir;
+  // 没有属主记录，但本目录已经有自己的实例目录 → 说明它就是一个实例，也改道
+  if (!owner && existsSync(dir)) return dir;
+  return undefined;
 }
 
 /** 属主工作区记录文件名（放在实例根目录下）：标明这份实例属于哪个工作区。 */

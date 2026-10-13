@@ -4,7 +4,7 @@ import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { BRIDGE_PI_PATH, CHILD_SESSION_ENV, CONFIG_PI_PATH, DAEMON_LOG_PATH, DEBUG_PI_LOG_PATH, DEDUPE_PI_PATH, ensureRoot, loadConfig, mask, removePath, PI_SOURCE, setRuntimeSource, STATE_PI_PATH, writeJson } from "../../feishu/config.ts";
+import { BRIDGE_PI_PATH, CHILD_SESSION_ENV, CONFIG_PI_PATH, DAEMON_LOG_PATH, DEBUG_PI_LOG_PATH, DEDUPE_PI_PATH, ensureRoot, loadConfig, mask, resolveConfigWriteTarget, removePath, PI_SOURCE, setRuntimeSource, STATE_PI_PATH, writeJson } from "../../feishu/config.ts";
 import { debugLog } from "../../feishu/debug.ts";
 import { FEISHU_UI_NOTIFY_EVENT, setFeishuUiNotifySink, type FeishuUiNotifyPayload } from "../../feishu/ui-notify.ts";
 import { FeishuBridgeRuntime } from "../../feishu/bridge-runtime.ts";
@@ -414,7 +414,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
         if (cmd === "setup") {
           const configToStart = await runSetup(ctx);
           if (configToStart) {
-            writeJson(CONFIG_PI_PATH, configToStart);
+            writeJson(resolveConfigWriteTarget().path, configToStart);
             notifyDaemonStartResult(ctx, await startDaemon(false));
           }
           refreshStatusFromState();
@@ -509,7 +509,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
             return;
           }
           cfg.autoStart = cfg.autoStart === false;
-          writeJson(CONFIG_PI_PATH, cfg);
+          writeJson(resolveConfigWriteTarget().path, cfg);
           ctx.ui.notify(cfg.autoStart ? "飞书自动启动已开启。" : "飞书自动启动已关闭。", "info");
           refreshStatusFromState();
           return;
