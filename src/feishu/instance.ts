@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -70,4 +71,40 @@ export function instanceWebhookPort(base: number, env: NodeJS.ProcessEnv = proce
   if (!dir) return base;
   const digest = createHash("sha1").update(`${dir}:${base}`).digest();
   return INSTANCE_PORT_BASE + (digest.readUInt16BE(0) % INSTANCE_PORT_SPAN);
+}
+
+/** 目录比较用的归一化：先展开 `~` 再取 realpath（软链、`/tmp` vs `/private/tmp` 视为同一处）；
+ * 目录已不存在时退回字面 resolve，保证纯函数在任何环境下都能给出确定结果。 */
+function normalizeDir(dir: string): string {
+  const expanded = resolve(expandHome(dir));
+  try {
+    return realpathSync(expanded);
+  } catch {
+    return expanded;
+  }
+}
+
+/**
+ * 是否「裸开复用了别的实例的全局配置」——自动启动前的保险。
+ *
+ * 三条件同时成立才算：
+ * 1. 本进程**没做实例隔离**（未设 `FEISHU_DATA_DIR`，走全局默认目录）；
+ * 2. 这份全局配置对应的连接锁已有 owner（能读到 owner 的 cwd）；
+ * 3. owner 的 cwd 与当前 cwd 归一化后**不是同一个目录**。
+ *
+ * 含义：这份全局配置（同一个机器人）属于**另一个工作区**。飞书长连接是集群模式、不广播，
+ * 两个实例共用同一个 appId 会互相抢连接，并让消息随机落到错的工作区，
+ * 因此调用方应拒绝自动启动，改为提示用户走实例目录 + 独立自建应用。
+ *
+ * 确需在别的目录临时接管时，设 `FEISHU_ALLOW_FOREIGN_WORKSPACE=1` 显式放行。
+ */
+export function isForeignWorkspace(
+  ownerCwd: string | undefined | null,
+  cwd: string = process.cwd(),
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (resolveInstanceDir(env)) return false;
+  if (env.FEISHU_ALLOW_FOREIGN_WORKSPACE === "1") return false;
+  if (!ownerCwd?.trim()) return false;
+  return normalizeDir(ownerCwd) !== normalizeDir(cwd);
 }

@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_ROOT_DIR,
   instanceWebhookPort,
+  isForeignWorkspace,
   resolveHarnessRoot,
   resolveInstanceDir,
   resolveRootDir,
@@ -93,4 +95,45 @@ test("端到端：设了 FEISHU_DATA_DIR 后 config.ts 的落盘路径整体迁�
   assert.equal(out.daemonLog, join(instanceDir, "daemon.log"));
   assert.equal(out.harnessRoot, join(instanceDir, "harness"));
   assert.ok(out.port >= 3003 && out.port <= 3099, `多实例端口应在 3003-3099，实际 ${out.port}`);
+});
+
+test("裸开保护：未隔离 + 锁 owner 属于另一个目录 → 判为外来工作区", () => {
+  assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/other", {}), true);
+});
+
+test("裸开保护：owner 就是本目录（含尾斜杠差异）→ 不算外来", () => {
+  assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/proj", {}), false);
+  assert.equal(isForeignWorkspace("/Users/a/proj/", "/Users/a/proj", {}), false);
+});
+
+test("裸开保护：没有 owner（本机从未起过 daemon）→ 放行", () => {
+  assert.equal(isForeignWorkspace(undefined, "/Users/a/proj", {}), false);
+  assert.equal(isForeignWorkspace("", "/Users/a/proj", {}), false);
+  assert.equal(isForeignWorkspace("   ", "/Users/a/proj", {}), false);
+});
+
+test("裸开保护：已做实例隔离时不适用（各用各的）", () => {
+  const env = { FEISHU_DATA_DIR: "/tmp/inst-b" };
+  assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/other", env), false);
+});
+
+test("裸开保护：FEISHU_ALLOW_FOREIGN_WORKSPACE=1 可显式放行", () => {
+  const env = { FEISHU_ALLOW_FOREIGN_WORKSPACE: "1" };
+  assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/other", env), false);
+});
+
+test("裸开保护：软链目录与真实目录视为同一处（realpath 归一化）", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "feishu-inst-"));
+  try {
+    const real = join(tmp, "proj");
+    mkdirSync(real, { recursive: true });
+    const link = join(tmp, "link");
+    symlinkSync(real, link);
+    // 同一目录的两种写法（真实路径 / 软链）→ 不算外来工作区
+    assert.equal(isForeignWorkspace(real, link, {}), false);
+    // 真的是另一个目录 → 外来
+    assert.equal(isForeignWorkspace(real, tmp, {}), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });

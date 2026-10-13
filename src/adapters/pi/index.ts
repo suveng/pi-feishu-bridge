@@ -11,6 +11,7 @@ import { FeishuBridgeRuntime } from "../../feishu/bridge-runtime.ts";
 import { FeishuBridgeStore } from "../../feishu/bridge-store.ts";
 import { FeishuDelivery } from "../../feishu/delivery.ts";
 import { acquireGatewayLock, gatewayLockPath, readAllGatewayOwnerPids, readGatewayOwner, type GatewayLockHandle, type GatewayOwner } from "../../feishu/gateway-lock.ts";
+import { isForeignWorkspace } from "../../feishu/instance.ts";
 import { FeishuMessageHandler } from "../../feishu/message-handler.ts";
 import { runSetup, uiConfirm } from "./setup.ts";
 import {
@@ -132,6 +133,8 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   const STATUS_REFRESH_MS = 2_000;
   let uiRef: { setStatus?: (key: string, text: string | undefined) => void } | undefined;
   let lastStatusText: string | undefined;
+  /** 裸开保护：本目录不是全局配置所属工作区时，记下 owner 的 cwd（用于状态栏与启动提示）。 */
+  let foreignWorkspaceOwner: string | undefined;
   let statusRefreshTimer: NodeJS.Timeout | undefined;
   const buildTag = process.env.FEISHU_EXT_DEV === "1" ? " [DEV]" : "";
 
@@ -172,6 +175,12 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     const brand = cfg?.domain === "lark" ? "Lark" : "Feishu";
     if (!cfg) {
       setStatusText(statusText(brand, "not configured"));
+      return;
+    }
+    // 裸开保护：不沿用锁 owner 的 connected（那是另一个工作区的连接），
+    // 固定显示归属方，避免误判「本工作区已连上机器人」。
+    if (foreignWorkspaceOwner) {
+      setStatusText(`${brand}: 连接属于其他工作区 / Owned by ${foreignWorkspaceOwner}`);
       return;
     }
     if (transport?.isRunning()) {
@@ -563,12 +572,28 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   pi.on("session_start", async (_event, ctx) => {
     uiRef = ctx.ui as any;
     startStatusRefresh();
+    if (foreignWorkspaceOwner) {
+      ctx.ui.notify(
+        `本目录不是该机器人的所属工作区（所属：${foreignWorkspaceOwner}），已跳过自动启动。\n` +
+          "要多开：设 FEISHU_DATA_DIR 并用另一个自建应用的 appId/appSecret；确需在本目录临时接管请设 FEISHU_ALLOW_FOREIGN_WORKSPACE=1。",
+        "warning",
+      );
+    }
     // 每个新会话默认隐藏配置工具，保持提示词干净；用户可用 /feishu tools on 打开。
     hideFeishuConfigTools(pi);
   });
 
   if (bootConfig?.autoStart) {
-    if (process.env.PI_FEISHU_DAEMON === "1") {
+    // 裸开保护：未做实例隔离且这把锁属于**另一个目录**时，拒绝自动启动 ——
+    // 否则会顶掉别的工作区的机器人连接（飞书长连接不广播，消息会随机落到错的工作区）。
+    const foreignOwner = currentGatewayOwner();
+    if (isForeignWorkspace(foreignOwner?.cwd)) {
+      foreignWorkspaceOwner = foreignOwner!.cwd;
+      console.error(
+        `[feishu] 本目录不是该机器人的所属工作区，已跳过自动启动：owner cwd=${foreignWorkspaceOwner}，本目录=${process.cwd()}。` +
+          " 要多开请设 FEISHU_DATA_DIR 并配另一个自建应用；FEISHU_ALLOW_FOREIGN_WORKSPACE=1 可强制接管。",
+      );
+    } else if (process.env.PI_FEISHU_DAEMON === "1") {
       start().then((result) => {
         if (typeof result === "object" && result.status === "owned") {
           console.error("[feishu] daemon found existing owner, exiting:", formatOwner(result.owner));
