@@ -10,7 +10,7 @@ import { FEISHU_UI_NOTIFY_EVENT, setFeishuUiNotifySink, type FeishuUiNotifyPaylo
 import { FeishuBridgeRuntime } from "../../feishu/bridge-runtime.ts";
 import { FeishuBridgeStore } from "../../feishu/bridge-store.ts";
 import { FeishuDelivery } from "../../feishu/delivery.ts";
-import { acquireGatewayLock, gatewayLockPath, readGatewayOwner, type GatewayLockHandle, type GatewayOwner } from "../../feishu/gateway-lock.ts";
+import { acquireGatewayLock, gatewayLockPath, readAllGatewayOwnerPids, readGatewayOwner, type GatewayLockHandle, type GatewayOwner } from "../../feishu/gateway-lock.ts";
 import { FeishuMessageHandler } from "../../feishu/message-handler.ts";
 import { runSetup, uiConfirm } from "./setup.ts";
 import {
@@ -599,13 +599,26 @@ type DaemonProcessInfo = {
   command: string;
 };
 
-function reapDetachedDaemonProcesses(options: { keepPids?: number[]; extensionPath?: string } = {}) {
+// 导出仅供测试直接验证多开隔离（见 test/reap-instance.test.ts）。
+export function reapDetachedDaemonProcesses(options: { keepPids?: number[]; extensionPath?: string } = {}) {
   if (process.platform === "win32") return;
 
-  const keep = new Set(options.keepPids || []);
+  // 多开（同机多个工作区）：命令行里只有共用的 `feishu/index.ts`，分不出实例归属，
+  // 所以「有主」一律以网关锁为准 —— 被任何一把锁认领的 pid（及其后代）都保留，
+  // 只回收没人认领的残留空壳（bash + tail）。否则在任一工作区敲 /feishu restart，
+  // 会把另一个工作区的 daemon 一起 SIGTERM。见 gateway-lock.readAllGatewayOwnerPids。
+  const keep = new Set([...(options.keepPids || []), ...readAllGatewayOwnerPids()]);
   const allProcesses = listProcesses();
   const roots = allProcesses.filter((proc) => looksLikeFeishuDaemon(proc.command, options.extensionPath));
   if (!roots.length) return;
+
+  const keptRoots = roots.filter((proc) => keep.has(proc.pid));
+  if (keptRoots.length) {
+    debugLog("feishu.reap.kept_locked_daemons", {
+      pids: keptRoots.map((proc) => proc.pid),
+      candidates: roots.length,
+    });
+  }
 
   const byParent = new Map<number, DaemonProcessInfo[]>();
   for (const proc of allProcesses) {

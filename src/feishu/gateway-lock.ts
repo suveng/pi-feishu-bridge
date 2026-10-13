@@ -5,6 +5,8 @@ import { debugLog } from "./debug.ts";
 
 /** 兼容旧版锁（未按 appId 区分时的固定 key）。 */
 const LEGACY_LOCK_KEY = "pi-feishu-lark.feishu-gateway";
+/** 网关锁 key 前缀：`<前缀><appId>`，一个机器人一把锁。 */
+const GATEWAY_LOCK_PREFIX = "ax-feishu-bridge.gateway.";
 const PI_AGENT_DIR = join(homedir(), ".pi", "agent");
 const LOCK_STALE_MS = 30_000;
 const LOCK_RETRY_MS = 25;
@@ -16,7 +18,7 @@ const HEARTBEAT_MS = 5_000;
  * 同一机器人（误配）仍互斥，避免抢同一个飞书连接。
  */
 function lockKeyFor(appId: string | undefined) {
-  return appId ? `ax-feishu-bridge.gateway.${appId}` : LEGACY_LOCK_KEY;
+  return appId ? `${GATEWAY_LOCK_PREFIX}${appId}` : LEGACY_LOCK_KEY;
 }
 
 /**
@@ -154,6 +156,25 @@ export function readGatewayOwner(appId?: string): GatewayOwner | undefined {
   const key = lockKeyFor(appId);
   const owner = asGatewayOwner(readLocksFile()[key], key);
   return owner && !isStale(owner) ? owner : undefined;
+}
+
+/**
+ * 列出本机**所有**实例（所有 appId，含 legacy key）当前活着的网关锁 owner pid。
+ *
+ * 用途：残留 daemon 回收只能按命令行里的 `feishu/index.ts` 广谱匹配 —— 各工作区共用同一份
+ * 插件源码，子串匹配分不出实例归属。多开（同机多工作区 + 各自的自建应用）时必须以锁为准：
+ * 凡被任何一把网关锁认领的 pid 都不回收，否则重启一个工作区会把另一个工作区一起 SIGTERM。
+ */
+export function readAllGatewayOwnerPids(): number[] {
+  const locks = readLocksFile();
+  const pids = new Set<number>();
+  for (const [key, value] of Object.entries(locks)) {
+    if (key !== LEGACY_LOCK_KEY && !key.startsWith(GATEWAY_LOCK_PREFIX)) continue;
+    const owner = asGatewayOwner(value, key);
+    // 死 pid 留着没用，还可能已被系统回收给无关进程 —— 只认活着的
+    if (owner && isProcessAlive(owner.pid)) pids.add(owner.pid);
+  }
+  return [...pids];
 }
 
 export function gatewayLockPath() {
