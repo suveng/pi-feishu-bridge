@@ -300,10 +300,13 @@ Windows PATH 加入 C:\Program Files\Git\bin
 ~/.pi/agent/feishu/config.json
 ```
 
+设了 `FEISHU_DATA_DIR` 时，上路径整体挪到该目录（见下方「同一台机器多开」）。
+
 也可以通过环境变量配置：
 
 | 变量                    | 说明                            |
 | --------------------- | ----------------------------- |
+| `FEISHU_DATA_DIR`     | 实例数据目录：多开时一个实例一个目录，配置/状态/日志/去重全部隔离；不设即主实例 `~/.pi/agent/feishu` |
 | `FEISHU_APP_ID`       | 飞书/Lark 应用 ID                 |
 | `FEISHU_APP_SECRET`   | 飞书/Lark 应用密钥                  |
 | `FEISHU_DOMAIN`       | `feishu` 或 `lark`，默认 `feishu` |
@@ -316,7 +319,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 | `FEISHU_AUTO_START`   | `1` 或 `0`                     |
 | `FEISHU_CARD_ACTION_MODE` | `webhook` 或 `ws`，默认 `webhook` |
 | `FEISHU_CARD_ACTION_WEBHOOK_HOST` | 卡片回调监听地址，默认 `0.0.0.0` |
-| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | 卡片回调端口，默认 `3001`（DSH 用 `HARNESS_CARD_ACTION_WEBHOOK_PORT`，默认 `3002`） |
+| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | 卡片回调端口，默认 `3001`（DSH 用 `HARNESS_CARD_ACTION_WEBHOOK_PORT`，默认 `3002`；设了 `FEISHU_DATA_DIR` 则按实例目录派生到 `3003-3099`） |
 | `FEISHU_CARD_ACTION_WEBHOOK_PATH` | 卡片回调路径，默认 `/webhook/card` |
 | `FEISHU_PROMPT_NOTIFY_SEC` | 长任务超过多少秒后在飞书发一条“仍在处理中”提示，默认 `180`，`0` 关闭 |
 | `FEISHU_PROMPT_TIMEOUT_SEC` | 任务硬超时秒数，超时后中止任务并报失败，默认 `0`（不设硬超时，长期运行也不会被报失败） |
@@ -361,6 +364,45 @@ Windows PATH 加入 C:\Program Files\Git\bin
 
 ***
 
+## 同一台机器多开（多工作区 / 多机器人）
+
+**硬前提：一个工作区一个机器人（各自的 `appId`）。** 飞书长连接是集群模式、**不广播** ——
+同一个应用即使开了多条连接，每条事件也只会随机推给其中一条。两个实例共用一个 `appId`
+会互相抢连接（日志里会出现 `system busy`），并让消息随机落到错误的工作区。
+连接锁按 `appId` 全局互斥，就是为了拦住这种误配。
+
+隔离方式是给每个额外实例设一个数据目录：
+
+```bash
+# 工作区 A（主实例）：不设 FEISHU_DATA_DIR，沿用 ~/.pi/agent/feishu
+cd ~/work/a && pi
+
+# 工作区 B（第二实例）：独立目录 + 独立机器人
+cd ~/work/b
+export FEISHU_DATA_DIR="$PWD/.pi/feishu"
+export FEISHU_APP_ID="cli_第二应用"
+export FEISHU_APP_SECRET="第二应用密钥"
+pi
+```
+
+设了 `FEISHU_DATA_DIR` 之后自动隔离：
+
+| 项 | 隔离后的位置 |
+| --- | --- |
+| `config.pi.json` / `state.pi.json` / `bridge.pi.json` / `debug.pi.log` / `daemon.log` / `runtime-overrides.json` | `$FEISHU_DATA_DIR/` |
+| 附件收件箱 | `$FEISHU_DATA_DIR/inbox/` |
+| DSH 侧同名文件 | `$FEISHU_DATA_DIR/harness/` |
+| 卡片回调端口 | 由目录派生，稳定落在 `3003-3099` |
+
+**故意不隔离的**只有连接锁：`~/.pi/agent/locks.json`（纯 DSH 环境为 `~/.dsh/locks.json`）。
+它必须全局唯一，否则两个实例都能抢到同一个机器人。
+
+回调端口按目录稳定派生：同一个目录每次算出的端口一样，所以飞书开放平台里的回调地址
+只需配一次；不同实例目录自然落到不同端口，不会互抢。要指定具体端口就显式设
+`FEISHU_CARD_ACTION_WEBHOOK_PORT`，显式值优先于派生值。
+
+***
+
 ## 会保存哪些文件
 
 | 路径                               | 内容                |
@@ -376,6 +418,8 @@ Windows PATH 加入 C:\Program Files\Git\bin
 
 > 连接锁选址：机器上装有 Pi（存在 `~/.pi/agent` 目录）时沿用 `~/.pi/agent/locks.json`，保证两边能协商同一个机器人的连接；纯 DSH 环境则使用 `~/.dsh/locks.json`。
 
+> 设了 `FEISHU_DATA_DIR` 时，上表中 `~/.pi/agent/feishu/*` 与 `~/.dsh/feishu/*` 的路径整体挪到该目录下（`$FEISHU_DATA_DIR/` 与 `$FEISHU_DATA_DIR/harness/`）；只有 `locks.json` 例外，它始终留在全局。
+
 ***
 
 ## 常见说明
@@ -390,7 +434,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 - `/workspace` 当前只支持绝对路径，或 `~/` 开头的路径。
 - `/resume` 默认先显示当前项目的最近历史会话，也可以在卡片里切到“全部会话”并翻页浏览。
 - 卡片按钮现在优先走 webhook 回包模式；如果你还想临时沿用旧的 WS 更新方式，可以把 `FEISHU_CARD_ACTION_MODE` 设成 `ws`。
-- 卡片回调默认监听 `0.0.0.0:3001/webhook/card`（Pi）/ `0.0.0.0:3002/webhook/card`（DSH），需要在飞书开发者后台把交互卡片回调地址指到一个外部可访问的 URL。
+- 卡片回调默认监听 `0.0.0.0:3001/webhook/card`（Pi）/ `0.0.0.0:3002/webhook/card`（DSH），需要在飞书开发者后台把交互卡片回调地址指到一个外部可访问的 URL。设了 `FEISHU_DATA_DIR` 的多实例会改成 `3003-3099` 中按目录派生的端口。
 
 ***
 
@@ -408,5 +452,9 @@ Windows PATH 加入 C:\Program Files\Git\bin
 
 如果你把群聊策略设成了 `mention`，就需要 `@` 机器人后它才会回复。\
 `open`模式下：群里和话题里可直接回复，不需要 @，但还需手动在飞书开发者后台开启机器人“获取群组中所有消息”权限才能生效。
+
+### 两个工作区的机器人互相抢连接 / 消息落错工作区？
+
+看是不是两个实例用了**同一个 `appId`**。飞书长连接不广播，同一应用的多条连接会随机分流，必须一个工作区一个自建应用；同时确认两边的 `FEISHU_DATA_DIR` 不同（否则配置、状态、日志会互相覆盖）。
 
 ### 还没有实现后台服务开机自启动功能，目前需要电脑开机后手动启动一次 Pi agent 才能正常工作。启动后，Pi agent 无需前台运行，关闭后，仍可以在飞书/Lark 里对话。

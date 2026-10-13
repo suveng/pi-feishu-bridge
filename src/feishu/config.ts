@@ -2,10 +2,15 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync, 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseGroupKeywords } from "./group-trigger.ts";
+import { instanceWebhookPort, resolveHarnessRoot, resolveRootDir } from "./instance.ts";
 import { applyRuntimeOverrides, getRuntimeOverrides, setRuntimeOverridesPath } from "./runtime-config.ts";
 import type { CardActionMode, Domain, FeishuConfig, GroupPolicy, LearnApprovalConfig } from "./types.ts";
 
-export const ROOT_DIR = join(homedir(), ".pi", "agent", "feishu");
+/**
+ * Feishu 数据根目录。默认 `~/.pi/agent/feishu`；设了 `FEISHU_DATA_DIR` 则整体挪到
+ * 实例目录，实现同一台机器上多工作区多开（见 instance.ts）。
+ */
+export const ROOT_DIR = resolveRootDir();
 
 /** dsh 的家目录：优先 DSH_HOME 环境变量，否则 ~/.dsh */
 export function dshHome(): string {
@@ -13,8 +18,8 @@ export function dshHome(): string {
   return fromEnv || join(homedir(), ".dsh");
 }
 
-/** Harness 数据目录：住在 dsh 自己的家目录下，不占用 ~/.pi */
-export const HARNESS_ROOT = join(dshHome(), "feishu");
+/** Harness 数据目录：住在 dsh 自己的家目录下，不占用 ~/.pi；启用实例目录时随实例隔离 */
+export const HARNESS_ROOT = resolveHarnessRoot(join(dshHome(), "feishu"));
 
 // ---------- Pi 适配器专用路径 ----------
 export const CONFIG_PI_PATH = join(ROOT_DIR, "config.pi.json");
@@ -161,9 +166,11 @@ export const DEFAULT_CONFIG: Pick<
  * 默认卡片回调端口：Pi 用 3001（历史默认），DSH 用 3002。
  * Pi 与 DSH 并行启用时如果都用 3001 会互相抢端口（EADDRINUSE），
  * 因此按 runtime 区分默认值，开箱即用即可共存。
+ * 多实例（设了 FEISHU_DATA_DIR）时再按实例目录派生到 3003-3099，
+ * 避免两份 Pi 在 3001 上互抢；显式 `FEISHU_CARD_ACTION_WEBHOOK_PORT` 优先。
  */
 export function defaultCardActionWebhookPort(): number {
-  return getRuntimeSource().id === "harness" ? 3002 : 3001;
+  return instanceWebhookPort(getRuntimeSource().id === "harness" ? 3002 : 3001);
 }
 
 export function ensureRoot() {

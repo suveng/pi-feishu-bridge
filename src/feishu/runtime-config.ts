@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
 import { parseGroupKeywords } from "./group-trigger.ts";
+import { resolveRootDir } from "./instance.ts";
 
 /** 运行时可改配置白名单（不含密钥/连接通道） */
 export const RUNTIME_CONFIG_KEYS = [
@@ -58,7 +58,8 @@ export type RuntimeConfigView = {
 
 export type RuntimeOverrides = Partial<Pick<RuntimeConfigView, RuntimeConfigKey>>;
 
-const FEISHU_ROOT = join(homedir(), ".pi", "agent", "feishu");
+// 实例目录由 instance.ts 统一解析，不要在这里再硬编码 ~/.pi/agent/feishu
+const FEISHU_ROOT = resolveRootDir();
 export const RUNTIME_OVERRIDES_PATH = join(FEISHU_ROOT, "runtime-overrides.json");
 
 /** 当前 runtime 的 overrides 落盘路径；默认 Pi，由 setRuntimeOverridesPath 切换 */

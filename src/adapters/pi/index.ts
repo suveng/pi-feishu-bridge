@@ -95,7 +95,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     if (!approval) {
       throw new Error(
         "未配置进化审批：请在飞书审批后台建一个带「多行文本」控件的审批，"
-        + "再把它的 approval_code 写进 ~/.pi/agent/feishu/config.pi.json 的 learnApproval.approvalCode",
+        + `再把它的 approval_code 写进 ${CONFIG_PI_PATH} 的 learnApproval.approvalCode`,
       );
     }
     return new LearnApprovalClient({

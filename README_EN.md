@@ -299,10 +299,13 @@ Config is saved by default at:
 ~/.pi/agent/feishu/config.json
 ```
 
+When `FEISHU_DATA_DIR` is set, everything above moves under that directory (see "Running multiple instances on one machine").
+
 It can also be configured via environment variables:
 
 | Variable                | Description                            |
 | --------------------- | ----------------------------- |
+| `FEISHU_DATA_DIR`     | Instance data directory: one directory per instance when running multiple instances; config/state/logs/dedupe are all isolated. Unset means the primary instance `~/.pi/agent/feishu` |
 | `FEISHU_APP_ID`       | Feishu/Lark app ID                 |
 | `FEISHU_APP_SECRET`   | Feishu/Lark app secret                  |
 | `FEISHU_DOMAIN`       | `feishu` or `lark`, default `feishu` |
@@ -315,7 +318,7 @@ It can also be configured via environment variables:
 | `FEISHU_AUTO_START`   | `1` or `0`                     |
 | `FEISHU_CARD_ACTION_MODE` | `webhook` or `ws`, default `webhook` |
 | `FEISHU_CARD_ACTION_WEBHOOK_HOST` | Card callback listen address, default `0.0.0.0` |
-| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | Card callback port, default `3001` (DSH uses `HARNESS_CARD_ACTION_WEBHOOK_PORT`, default `3002`) |
+| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | Card callback port, default `3001` (DSH uses `HARNESS_CARD_ACTION_WEBHOOK_PORT`, default `3002`; with `FEISHU_DATA_DIR` it is derived from the instance directory into `3003-3099`) |
 | `FEISHU_CARD_ACTION_WEBHOOK_PATH` | Card callback path, default `/webhook/card` |
 | `FEISHU_PROMPT_NOTIFY_SEC` | After a long task exceeds this many seconds, send a "still processing" notice in Feishu, default `180`, `0` disables |
 | `FEISHU_PROMPT_TIMEOUT_SEC` | Hard timeout in seconds; the task is aborted and reported failed on timeout, default `0` (no hard timeout — even long-running tasks won't be reported failed) |
@@ -357,6 +360,39 @@ The hot-updatable scope only includes `groupPolicy`, `groupKeywords`, `groupAlso
 
 ***
 
+## Running Multiple Instances on One Machine (multiple workspaces / bots)
+
+**Hard prerequisite: one bot per workspace (each with its own `appId`).** Feishu long connections are clustered and **do not broadcast** — even if one app opens several connections, each event is delivered to only one of them at random. Two instances sharing one `appId` will fight over the connection (you will see `system busy` in the logs) and messages will randomly land in the wrong workspace. The connection lock is mutually exclusive per `appId` precisely to block that misconfiguration.
+
+Isolation is done by giving each extra instance its own data directory:
+
+```bash
+# Workspace A (primary): leave FEISHU_DATA_DIR unset, keeps using ~/.pi/agent/feishu
+cd ~/work/a && pi
+
+# Workspace B (second instance): own directory + own bot
+cd ~/work/b
+export FEISHU_DATA_DIR="$PWD/.pi/feishu"
+export FEISHU_APP_ID="cli_second_app"
+export FEISHU_APP_SECRET="second_app_secret"
+pi
+```
+
+Setting `FEISHU_DATA_DIR` isolates automatically:
+
+| Item | Isolated location |
+| --- | --- |
+| `config.pi.json` / `state.pi.json` / `bridge.pi.json` / `debug.pi.log` / `daemon.log` / `runtime-overrides.json` | `$FEISHU_DATA_DIR/` |
+| Attachment inbox | `$FEISHU_DATA_DIR/inbox/` |
+| DSH-side files with the same names | `$FEISHU_DATA_DIR/harness/` |
+| Card callback port | Derived from the directory, stably within `3003-3099` |
+
+**The only thing deliberately left global** is the connection lock: `~/.pi/agent/locks.json` (or `~/.dsh/locks.json` in a DSH-only setup). It must be unique machine-wide, otherwise two instances could both claim the same bot.
+
+The callback port is derived stably from the directory: the same directory always yields the same port, so the callback URL in the Feishu developer console only needs to be configured once; different instance directories naturally land on different ports. To pin an exact port, set `FEISHU_CARD_ACTION_WEBHOOK_PORT` explicitly — explicit values win over the derived one.
+
+***
+
 ## Stored Files
 
 | Path                               | Content                |
@@ -368,6 +404,8 @@ The hot-updatable scope only includes `groupPolicy`, `groupKeywords`, `groupAlso
 | `~/.pi/agent/feishu/debug.log`   | Debug log              |
 | `~/.pi/agent/locks.json`         | Owner lock of the current Feishu connection   |
 | `~/.pi/agent/sessions/`          | Pi session files for each Feishu chat |
+
+> When `FEISHU_DATA_DIR` is set, the `~/.pi/agent/feishu/*` and `~/.dsh/feishu/*` paths above move under that directory (`$FEISHU_DATA_DIR/` and `$FEISHU_DATA_DIR/harness/`); `locks.json` is the only exception and always stays global.
 
 ***
 
@@ -381,7 +419,7 @@ The hot-updatable scope only includes `groupPolicy`, `groupKeywords`, `groupAlso
 - `/workspace` currently only supports absolute paths, or paths starting with `~/`.
 - `/resume` first shows the recent sessions of the current project by default; you can switch to "all sessions" in the card and page through them.
 - Card buttons now prefer webhook response mode; if you want to temporarily keep the older WS update flow, set `FEISHU_CARD_ACTION_MODE` to `ws`.
-- The card callback listens on `0.0.0.0:3001/webhook/card` (Pi) / `0.0.0.0:3002/webhook/card` (DSH) by default; you need to point the interactive card callback URL to an externally reachable URL in the Feishu developer console.
+- The card callback listens on `0.0.0.0:3001/webhook/card` (Pi) / `0.0.0.0:3002/webhook/card` (DSH) by default; you need to point the interactive card callback URL to an externally reachable URL in the Feishu developer console. Multi-instance setups using `FEISHU_DATA_DIR` instead use a port derived into `3003-3099`.
 
 ***
 
@@ -399,5 +437,9 @@ Check three things:
 
 If you set the group policy to `mention`, the bot replies only after being `@`-mentioned.\
 In `open` mode: it can reply directly in groups and topics without an @, but you still need to manually enable the "receive all messages in group chats" permission for the bot in the Feishu developer console for it to take effect.
+
+### Two workspaces' bots keep fighting over the connection / messages land in the wrong workspace?
+
+Check whether both instances use the **same `appId`**. Feishu long connections do not broadcast, and multiple connections of one app get randomly split, so you need one self-built app per workspace. Also confirm the two `FEISHU_DATA_DIR` values differ (otherwise config, state, and logs overwrite each other).
 
 ### Boot auto-start of the background service is not implemented yet; currently you need to manually start the Pi agent once after the computer boots for it to work properly. Once started, the Pi agent does not need to run in the foreground — even after it is closed, you can still chat in Feishu/Lark.
