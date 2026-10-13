@@ -2,13 +2,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync, 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseGroupKeywords } from "./group-trigger.ts";
-import { instanceWebhookPort, readOwnerWorkspace, resolveHarnessRoot, resolveRootDir, workspaceInstanceDir } from "./instance.ts";
+import { instanceWebhookPort, LEGACY_GLOBAL_ROOT_DIR, OWNER_WORKSPACE_FILE, readOwnerWorkspaceAt, resolveHarnessRoot, resolveRootDir, sameWorkspace } from "./instance.ts";
 import { applyRuntimeOverrides, getRuntimeOverrides, setRuntimeOverridesPath } from "./runtime-config.ts";
 import type { CardActionMode, Domain, FeishuConfig, GroupPolicy, LearnApprovalConfig } from "./types.ts";
 
 /**
- * Feishu 数据根目录。默认 `~/.pi/agent/feishu`；设了 `FEISHU_DATA_DIR` 则整体挪到
- * 实例目录，实现同一台机器上多工作区多开（见 instance.ts）。
+ * Feishu 数据根目录。**跟着工作区走**：默认 `<工作区根>/.pi/feishu`，
+ * 设了 `FEISHU_DATA_DIR` 则用显式值（见 instance.ts）。
  */
 export const ROOT_DIR = resolveRootDir();
 
@@ -18,8 +18,8 @@ export function dshHome(): string {
   return fromEnv || join(homedir(), ".dsh");
 }
 
-/** Harness 数据目录：住在 dsh 自己的家目录下，不占用 ~/.pi；启用实例目录时随实例隔离 */
-export const HARNESS_ROOT = resolveHarnessRoot(join(dshHome(), "feishu"));
+/** Harness 数据目录：与 Pi 同住实例目录下的 `harness/`，一起跟着工作区走 */
+export const HARNESS_ROOT = resolveHarnessRoot();
 
 // ---------- Pi 适配器专用路径 ----------
 export const CONFIG_PI_PATH = join(ROOT_DIR, "config.pi.json");
@@ -163,17 +163,16 @@ export const DEFAULT_CONFIG: Pick<
 };
 
 /**
- * 默认卡片回调端口：Pi 用 3001（历史默认），DSH 用 3002。
- * Pi 与 DSH 并行启用时如果都用 3001 会互相抢端口（EADDRINUSE），
- * 因此按 runtime 区分默认值，开箱即用即可共存。
- * 多实例（设了 FEISHU_DATA_DIR）时再按实例目录派生到 3003-3099，
- * 避免两份 Pi 在 3001 上互抢；显式 `FEISHU_CARD_ACTION_WEBHOOK_PORT` 优先。
+ * 卡片回调端口：Pi 与 DSH 用不同的 base（3001 / 3002）岔开，
+ * 再按实例目录稳定派生到 3003-3099，避免同一台机器上多个工作区（或两个 runtime）
+ * 在同一个端口上互抢；显式 `FEISHU_CARD_ACTION_WEBHOOK_PORT` 优先。
  */
 export function defaultCardActionWebhookPort(): number {
   return instanceWebhookPort(getRuntimeSource().id === "harness" ? 3002 : 3001);
 }
 
 export function ensureRoot() {
+  migrateLegacyGlobalInstance();
   if (getRuntimeSource().id === "harness") {
     mkdirSync(HARNESS_ROOT, { recursive: true });
     return;
@@ -183,19 +182,33 @@ export function ensureRoot() {
 }
 
 /**
- * 写配置时的实际落点：默认全局 `CONFIG_PI_PATH`；若本目录不是这份全局实例的属主工作区
- * （典型场景：在另一个工作区里扫码建应用），则改道到本目录的实例目录，
- * 避免把主工作区的机器人配置覆盖掉。
- * 返回值里的 `redirectedDir` 非空时，调用方应提示用户用 `./.pi/pi-feishu.sh` 启动。
+ * 把 0.5.x 的全局实例数据搬到工作区实例目录（0.6.0 起实例跟着工作区走，不再有全局实例）。
+ *
+ * 三个条件同时成立才搬，避免偷走别的工作区的数据：
+ * 1. 没有显式指定 `FEISHU_DATA_DIR`；
+ * 2. 本工作区实例目录还不存在，而旧全局目录存在；
+ * 3. 旧全局目录里的属主工作区记录就是本工作区。
+ *
+ * 用 rename（同盘瞬间完成），失败只打印提示、不做任何删除。
  */
-export function resolveConfigWriteTarget(
-  cwd: string = process.cwd(),
-  env: NodeJS.ProcessEnv = process.env,
-  recordedOwnerCwd: string | null | undefined = readOwnerWorkspace(env),
-): { path: string; redirectedDir?: string } {
-  const dir = workspaceInstanceDir(cwd, env, recordedOwnerCwd);
-  if (!dir) return { path: CONFIG_PI_PATH };
-  return { path: join(dir, "config.pi.json"), redirectedDir: dir };
+function migrateLegacyGlobalInstance() {
+  if (existsSync(ROOT_DIR) || !existsSync(LEGACY_GLOBAL_ROOT_DIR)) return;
+  const owner = readOwnerWorkspaceAt(join(LEGACY_GLOBAL_ROOT_DIR, OWNER_WORKSPACE_FILE));
+  if (!owner || !sameWorkspace(owner, process.cwd())) {
+    console.error(
+      `[feishu] 检测到旧全局实例目录 ${LEGACY_GLOBAL_ROOT_DIR}（属主：${owner ?? "未知"}），不属于本工作区，未自动搬迁。`,
+    );
+    return;
+  }
+  try {
+    mkdirSync(dirname(ROOT_DIR), { recursive: true });
+    renameSync(LEGACY_GLOBAL_ROOT_DIR, ROOT_DIR);
+    console.error(`[feishu] 已把旧全局实例数据搬到工作区实例目录：${ROOT_DIR}`);
+  } catch (error) {
+    console.error(
+      `[feishu] 搬迁旧全局实例数据失败（未做任何删除）：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 /**

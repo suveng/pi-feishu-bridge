@@ -120,7 +120,8 @@ test("多开：被网关锁认领的 daemon（含启动壳与 tail）不被回�
   try {
     const result = spawnSync(process.execPath, ["--experimental-strip-types", "-e", PROBE], {
       cwd: REPO_ROOT,
-      env: { ...process.env, HOME: home, DSH_HOME: dshHome },
+      // FEISHU_DATA_DIR 指到临时目录：探针里的 ensureRoot()/debugLog() 不该往仓库或真实 HOME 写东西
+      env: { ...process.env, HOME: home, DSH_HOME: dshHome, FEISHU_DATA_DIR: join(home, "feishu-data") },
       encoding: "utf8",
     });
     assert.equal(result.status, 0, `子进程应正常退出：${result.stderr}`);

@@ -1,135 +1,210 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  DEFAULT_ROOT_DIR,
+  explicitInstanceDir,
   instanceWebhookPort,
   isForeignWorkspace,
   ownerWorkspacePath,
   readOwnerWorkspace,
+  readOwnerWorkspaceAt,
+  sameWorkspace,
   writeOwnerWorkspace,
   resolveHarnessRoot,
   resolveInstanceDir,
   resolveRootDir,
   workspaceInstanceDir,
 } from "../src/feishu/instance.ts";
-import { resolveConfigWriteTarget } from "../src/feishu/config.ts";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const NODE = ["--experimental-strip-types", "-e"];
 
-test("未设 FEISHU_DATA_DIR 时按主实例处理（向后兼容）", () => {
-  const env = {};
-  assert.equal(resolveInstanceDir(env), undefined);
-  assert.equal(resolveRootDir(env), DEFAULT_ROOT_DIR);
-  assert.equal(resolveHarnessRoot("/dsh/feishu", env), "/dsh/feishu");
+/** 跑一段子进程探针，返回 stdout 解析后的对象（cwd / env 由调用方决定）。 */
+function probe(script: string, cwd: string, env: NodeJS.ProcessEnv, expectStatus = 0): { stdout: string; stderr: string; json?: any } {
+  const result = spawnSync(process.execPath, [...NODE, script], { cwd, env, encoding: "utf8" });
+  assert.equal(result.status, expectStatus, `子进程应退出码 ${expectStatus}，实际 ${result.status}：${result.stderr}`);
+  const trimmed = result.stdout.trim();
+  return { stdout: result.stdout, stderr: result.stderr, json: trimmed ? JSON.parse(trimmed) : undefined };
+}
+
+const CONFIG_PROBE = [
+  `import * as cfg from ${JSON.stringify(join(REPO_ROOT, "src", "feishu", "config.ts"))};`,
+  "cfg.ensureRoot();", // 迁移发生在这里，探针必须真的跑一次
+  "console.log(JSON.stringify({",
+  "  root: cfg.ROOT_DIR,",
+  "  state: cfg.STATE_PI_PATH,",
+  "  config: cfg.CONFIG_PI_PATH,",
+  "  daemonLog: cfg.DAEMON_LOG_PATH,",
+  "  harnessRoot: cfg.HARNESS_ROOT,",
+  "  port: cfg.defaultCardActionWebhookPort(),",
+  "}));",
+].join("\n");
+
+test("默认跟着工作区走：实例目录 = <工作区>/.pi/feishu（没有全局实例）", () => {
+  const ws = "/tmp/feishu-ws-a";
+  assert.equal(explicitInstanceDir({}), undefined);
+  assert.equal(resolveInstanceDir({}, ws), join(ws, ".pi", "feishu"));
+  assert.equal(resolveRootDir({}, ws), join(ws, ".pi", "feishu"));
+  assert.equal(resolveHarnessRoot({}, ws), join(ws, ".pi", "feishu", "harness"));
+  assert.equal(workspaceInstanceDir(ws), join(ws, ".pi", "feishu"));
+  // 不同工作区天然互不相同
+  assert.notEqual(resolveRootDir({}, ws), resolveRootDir({}, "/tmp/feishu-ws-b"));
 });
 
-test("FEISHU_DATA_DIR 为空串或纯空白等同于未设", () => {
-  assert.equal(resolveInstanceDir({ FEISHU_DATA_DIR: "" }), undefined);
-  assert.equal(resolveInstanceDir({ FEISHU_DATA_DIR: "   " }), undefined);
+test("FEISHU_DATA_DIR 为空串或纯空白等同于未设（仍跟着工作区走）", () => {
+  const ws = "/tmp/feishu-ws-a";
+  assert.equal(explicitInstanceDir({ FEISHU_DATA_DIR: "" }), undefined);
+  assert.equal(explicitInstanceDir({ FEISHU_DATA_DIR: "   " }), undefined);
+  assert.equal(resolveInstanceDir({ FEISHU_DATA_DIR: "" }, ws), join(ws, ".pi", "feishu"));
+  assert.equal(resolveInstanceDir({ FEISHU_DATA_DIR: "   " }, ws), join(ws, ".pi", "feishu"));
 });
 
-test("FEISHU_DATA_DIR 生效时根目录跟随，Harness 挪到实例目录下的 harness/", () => {
+test("FEISHU_DATA_DIR 显式指定时优先，Harness 跟着挪到 <实例>/harness", () => {
   const dir = "/tmp/feishu-inst-a";
   const env = { FEISHU_DATA_DIR: dir };
-  assert.equal(resolveInstanceDir(env), dir);
-  assert.equal(resolveRootDir(env), dir);
-  assert.equal(resolveHarnessRoot("/dsh/feishu", env), join(dir, "harness"));
+  assert.equal(explicitInstanceDir(env), dir);
+  assert.equal(resolveInstanceDir(env, "/tmp/feishu-ws-a"), dir);
+  assert.equal(resolveRootDir(env, "/tmp/feishu-ws-a"), dir);
+  assert.equal(resolveHarnessRoot(env, "/tmp/feishu-ws-a"), join(dir, "harness"));
 });
 
 test("FEISHU_DATA_DIR 支持 ~ 展开与相对路径转绝对路径", () => {
-  assert.equal(resolveInstanceDir({ FEISHU_DATA_DIR: "~" }), homedir());
-  assert.equal(resolveInstanceDir({ FEISHU_DATA_DIR: "~/feishu-b" }), join(homedir(), "feishu-b"));
-  const rel = resolveInstanceDir({ FEISHU_DATA_DIR: "feishu-c" });
+  assert.equal(explicitInstanceDir({ FEISHU_DATA_DIR: "~" }), homedir());
+  assert.equal(explicitInstanceDir({ FEISHU_DATA_DIR: "~/feishu-b" }), join(homedir(), "feishu-b"));
+  const rel = explicitInstanceDir({ FEISHU_DATA_DIR: "feishu-c" });
   assert.ok(rel && rel.startsWith("/"), `相对路径应转为绝对路径，实际 ${rel}`);
 });
 
-test("端口：主实例沿用 3001/3002，多实例派生到 3003-3099", () => {
-  assert.equal(instanceWebhookPort(3001, {}), 3001);
-  assert.equal(instanceWebhookPort(3002, {}), 3002);
-
-  const derived = instanceWebhookPort(3001, { FEISHU_DATA_DIR: "/tmp/feishu-inst-a" });
+test("端口：一律按实例目录派生到 3003-3099，同一目录稳定、不同目录不同", () => {
+  const ws = "/tmp/feishu-ws-a";
+  const derived = instanceWebhookPort(3001, {}, ws);
   assert.ok(derived >= 3003 && derived <= 3099, `派生端口应在 3003-3099，实际 ${derived}`);
-});
-
-test("端口：同一实例目录稳定、不同目录互不相同、Pi 与 DSH 不撞端口", () => {
-  const a = { FEISHU_DATA_DIR: "/tmp/feishu-inst-a" };
   // 同一目录重复调用必须稳定（飞书后台的回调地址只需配一次）
-  assert.equal(instanceWebhookPort(3001, a), instanceWebhookPort(3001, a));
+  assert.equal(instanceWebhookPort(3001, {}, ws), derived);
   // 同一目录下 Pi 与 DSH 的 base 不同，端口也不应相同
-  assert.notEqual(instanceWebhookPort(3001, a), instanceWebhookPort(3002, a));
+  assert.notEqual(instanceWebhookPort(3001, {}, ws), instanceWebhookPort(3002, {}, ws));
+  // 显式实例目录同样生效、且与工作区默认目录不同
+  assert.ok(instanceWebhookPort(3001, { FEISHU_DATA_DIR: "/tmp/feishu-inst-a" }, ws) >= 3003);
 
   const ports = new Set<number>();
-  const bases = new Set<number>();
-  for (let i = 0; i < 12; i += 1) {
-    const env = { FEISHU_DATA_DIR: `/tmp/feishu-inst-${i}` };
-    ports.add(instanceWebhookPort(3001, env));
-    bases.add(instanceWebhookPort(3001, env));
+  for (let i = 0; i < 12; i += 1) ports.add(instanceWebhookPort(3001, {}, `/tmp/feishu-ws-${i}`));
+  assert.ok(ports.size > 1, "12 个不同工作区不应全部落到同一个端口");
+});
+
+test("端到端：未设 FEISHU_DATA_DIR 时 config.ts 的落盘路径跟着 cwd 走", () => {
+  const home = mkdtempSync(join(tmpdir(), "feishu-home-"));
+  const ws = join(home, "ws");
+  mkdirSync(ws, { recursive: true });
+  const base = realpathSync(ws);
+  try {
+    const { json } = probe(CONFIG_PROBE, ws, { ...process.env, HOME: home, DSH_HOME: join(home, "dsh") });
+    assert.equal(json.root, join(base, ".pi", "feishu"));
+    assert.equal(json.state, join(base, ".pi", "feishu", "state.pi.json"));
+    assert.equal(json.config, join(base, ".pi", "feishu", "config.pi.json"));
+    assert.equal(json.daemonLog, join(base, ".pi", "feishu", "daemon.log"));
+    assert.equal(json.harnessRoot, join(base, ".pi", "feishu", "harness"));
+    assert.ok(json.port >= 3003 && json.port <= 3099, `端口应在 3003-3099，实际 ${json.port}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
-  assert.ok(ports.size > 1, "12 个不同实例目录不应全部落到同一个端口");
-  assert.deepEqual([...ports].sort(), [...bases].sort());
 });
 
-test("端到端：设了 FEISHU_DATA_DIR 后 config.ts 的落盘路径整体迁移", () => {
-  const instanceDir = join(REPO_ROOT, "test", "fixtures", "instance-dir-probe");
-  const script = [
-    "import * as cfg from './src/feishu/config.ts';",
-    "console.log(JSON.stringify({",
-    "  root: cfg.ROOT_DIR,",
-    "  state: cfg.STATE_PI_PATH,",
-    "  config: cfg.CONFIG_PI_PATH,",
-    "  daemonLog: cfg.DAEMON_LOG_PATH,",
-    "  harnessRoot: cfg.HARNESS_ROOT,",
-    "  port: cfg.defaultCardActionWebhookPort(),",
-    "}));",
-  ].join("\n");
-  const result = spawnSync(process.execPath, ["--experimental-strip-types", "-e", script], {
-    cwd: REPO_ROOT,
-    env: { ...process.env, FEISHU_DATA_DIR: instanceDir, DSH_HOME: "/tmp/dsh-probe" },
-    encoding: "utf8",
-  });
-  assert.equal(result.status, 0, `子进程应正常退出：${result.stderr}`);
-  const out = JSON.parse(result.stdout.trim());
-  assert.equal(out.root, instanceDir);
-  assert.equal(out.state, join(instanceDir, "state.pi.json"));
-  assert.equal(out.config, join(instanceDir, "config.pi.json"));
-  assert.equal(out.daemonLog, join(instanceDir, "daemon.log"));
-  assert.equal(out.harnessRoot, join(instanceDir, "harness"));
-  assert.ok(out.port >= 3003 && out.port <= 3099, `多实例端口应在 3003-3099，实际 ${out.port}`);
+test("端到端：设了 FEISHU_DATA_DIR 时落盘路径整体落到该目录", () => {
+  const home = mkdtempSync(join(tmpdir(), "feishu-home-"));
+  const instanceDir = join(home, "instance");
+  try {
+    const { json } = probe(CONFIG_PROBE, REPO_ROOT, {
+      ...process.env,
+      HOME: home,
+      FEISHU_DATA_DIR: instanceDir,
+      DSH_HOME: join(home, "dsh"),
+    });
+    assert.equal(json.root, instanceDir);
+    assert.equal(json.state, join(instanceDir, "state.pi.json"));
+    assert.equal(json.config, join(instanceDir, "config.pi.json"));
+    assert.equal(json.daemonLog, join(instanceDir, "daemon.log"));
+    assert.equal(json.harnessRoot, join(instanceDir, "harness"));
+    assert.ok(json.port >= 3003 && json.port <= 3099, `派生端口应在 3003-3099，实际 ${json.port}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
-test("裸开保护：未隔离 + 锁 owner 属于另一个目录 → 判为外来工作区", () => {
+test("迁移：旧全局目录的属主是本工作区 → 整份搬到工作区实例目录", () => {
+  const home = mkdtempSync(join(tmpdir(), "feishu-home-"));
+  const ws = join(home, "ws");
+  const legacy = join(home, ".pi", "agent", "feishu");
+  mkdirSync(legacy, { recursive: true });
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(legacy, "config.pi.json"), '{"appId":"cli_x"}\n', "utf8");
+  writeFileSync(join(legacy, "owner-workspace.json"), JSON.stringify({ cwd: realpathSync(ws) }), "utf8");
+  try {
+    const { stderr } = probe(CONFIG_PROBE, ws, { ...process.env, HOME: home, DSH_HOME: join(home, "dsh") });
+    const moved = join(realpathSync(ws), ".pi", "feishu");
+    assert.ok(existsSync(join(moved, "config.pi.json")), `旧配置应搬到 ${moved}`);
+    assert.ok(!existsSync(legacy), "旧全局目录应已整体搬走（不残留半份数据）");
+    assert.match(stderr, /已把旧全局实例数据搬到工作区实例目录/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("迁移：旧全局目录的属主是别的工作区 → 不动它，只打印提示", () => {
+  const home = mkdtempSync(join(tmpdir(), "feishu-home-"));
+  const ws = join(home, "ws");
+  const legacy = join(home, ".pi", "agent", "feishu");
+  mkdirSync(legacy, { recursive: true });
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(legacy, "config.pi.json"), '{"appId":"cli_x"}\n', "utf8");
+  writeFileSync(join(legacy, "owner-workspace.json"), JSON.stringify({ cwd: join(home, "somewhere-else") }), "utf8");
+  try {
+    const { json, stderr } = probe(CONFIG_PROBE, ws, { ...process.env, HOME: home, DSH_HOME: join(home, "dsh") });
+    assert.ok(existsSync(join(legacy, "config.pi.json")), "别的工作区的数据必须原样留着");
+    assert.equal(json.root, join(realpathSync(ws), ".pi", "feishu"));
+    assert.match(stderr, /不属于本工作区，未自动搬迁/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("外来工作区保护：锁 owner 属于另一个目录 → 判为外来", () => {
   assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/other", {}), true);
 });
 
-test("裸开保护：owner 就是本目录（含尾斜杠差异）→ 不算外来", () => {
+test("外来工作区保护：owner 就是本目录（含尾斜杠差异）→ 不算外来", () => {
   assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/proj", {}), false);
   assert.equal(isForeignWorkspace("/Users/a/proj/", "/Users/a/proj", {}), false);
 });
 
-test("裸开保护：没有 owner（本机从未起过 daemon）→ 放行", () => {
+test("外来工作区保护：在子目录里启动 pi 也算同一个工作区", () => {
+  assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/proj/sub", {}), false);
+  assert.equal(isForeignWorkspace("/Users/a/proj/sub", "/Users/a/proj", {}), false);
+});
+
+test("外来工作区保护：没有 owner（本机从未起过 daemon）→ 放行", () => {
   assert.equal(isForeignWorkspace(undefined, "/Users/a/proj", {}), false);
   assert.equal(isForeignWorkspace("", "/Users/a/proj", {}), false);
   assert.equal(isForeignWorkspace("   ", "/Users/a/proj", {}), false);
 });
 
-test("裸开保护：已做实例隔离时不适用（各用各的）", () => {
-  const env = { FEISHU_DATA_DIR: "/tmp/inst-b" };
-  assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/other", env), false);
-});
-
-test("裸开保护：FEISHU_ALLOW_FOREIGN_WORKSPACE=1 可显式放行", () => {
+test("外来工作区保护：FEISHU_ALLOW_FOREIGN_WORKSPACE=1 可显式放行", () => {
   const env = { FEISHU_ALLOW_FOREIGN_WORKSPACE: "1" };
   assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/other", env), false);
 });
 
-test("裸开保护：记录里的属主是另一个目录 → 锁空闲时也判为外来（0.5.2 新增）", () => {
-  // 上一版的漏洞：本工作区 daemon 一停，锁就空了，别的目录裸开就会把连接接走；
-  // 有了属主记录，即便锁里没有 owner 也能分辨出这份配置属于谁。
+test("外来工作区保护：显式 FEISHU_DATA_DIR 不会让别人的机器人变成自己的（仍拦）", () => {
+  // 实例目录跟着工作区走之后，显式目录只影响落盘位置，不改变「这个机器人属于谁」——
+  // 同一个 appId 被两个工作区共用会互抢连接，所以照拦。
+  const env = { FEISHU_DATA_DIR: "/tmp/inst-b" };
+  assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/other", env), true);
+});
+
+test("外来工作区保护：记录里的属主是另一个目录 → 锁空闲时也判为外来", () => {
+  // 本工作区 daemon 一停，锁就空了；有了属主记录，即便锁里没有 owner 也能分辨归属。
   assert.equal(isForeignWorkspace(undefined, "/Users/a/other", {}, "/Users/a/proj"), true);
   assert.equal(isForeignWorkspace(undefined, "/Users/a/proj", {}, "/Users/a/proj/"), false);
   // 锁 owner 与记录都指向本目录 → 放行
@@ -154,6 +229,7 @@ test("属主工作区记录：写入后可读回，落在实例根目录，损�
     // 目标目录还不存在时退回 resolve（不因 realpath 失败而拒绝写）
     writeOwnerWorkspace(join(tmp, "proj-b", "nested"), env);
     assert.equal(readOwnerWorkspace(env), join(tmp, "proj-b", "nested"));
+    assert.equal(readOwnerWorkspaceAt(ownerWorkspacePath(env)), join(tmp, "proj-b", "nested"));
     // 损坏的 JSON → undefined（不抛）
     writeFileSync(ownerWorkspacePath(env), "{ 不是 json", "utf8");
     assert.equal(readOwnerWorkspace(env), undefined);
@@ -165,45 +241,47 @@ test("属主工作区记录：写入后可读回，落在实例根目录，损�
   }
 });
 
-test("扫码改道：属主在别处 → 凭证写本目录实例，不碰全局（0.5.3）", () => {
-  const other = "/Users/a/proj";
-  const mine = "/Users/a/other";
-  // 判定：本目录实例目录
-  assert.equal(workspaceInstanceDir(mine, {}, other), join(mine, ".pi", "feishu"));
-  // 落点：本目录实例的 config.pi.json + 带 redirectedDir（调用方据此提示用启动器）
-  const target = resolveConfigWriteTarget(mine, {}, other);
-  assert.equal(target.path, join(mine, ".pi", "feishu", "config.pi.json"));
-  assert.equal(target.redirectedDir, join(mine, ".pi", "feishu"));
-  // 主工作区自己 / 已隔离 / 显式放行 → 都不改道，仍写全局
-  assert.equal(resolveConfigWriteTarget("/Users/a/proj", {}, "/Users/a/proj").path, join(DEFAULT_ROOT_DIR, "config.pi.json"));
-  assert.equal(resolveConfigWriteTarget(mine, { FEISHU_DATA_DIR: "/tmp/inst-b" }, other).path, join(DEFAULT_ROOT_DIR, "config.pi.json"));
-  assert.equal(resolveConfigWriteTarget(mine, { FEISHU_ALLOW_FOREIGN_WORKSPACE: "1" }, other).path, join(DEFAULT_ROOT_DIR, "config.pi.json"));
-});
-
-test("扫码改道：没有属主记录但本目录已有 .pi/feishu → 也改道", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "feishu-redirect-"));
-  const base = realpathSync(tmp); // macOS 的 /var 是 /private/var 的软链，比较前先归一化
-  try {
-    assert.equal(workspaceInstanceDir(tmp, {}, undefined), undefined, "没有实例目录时照常写全局");
-    mkdirSync(join(tmp, ".pi", "feishu"), { recursive: true });
-    assert.equal(workspaceInstanceDir(tmp, {}, undefined), join(base, ".pi", "feishu"));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test("裸开保护：软链目录与真实目录视为同一处（realpath 归一化）", () => {
+test("保护：软链目录与真实目录视为同一处（realpath 归一化）", () => {
   const tmp = mkdtempSync(join(tmpdir(), "feishu-inst-"));
   try {
     const real = join(tmp, "proj");
+    const other = join(tmp, "other");
     mkdirSync(real, { recursive: true });
+    mkdirSync(other, { recursive: true });
     const link = join(tmp, "link");
     symlinkSync(real, link);
     // 同一目录的两种写法（真实路径 / 软链）→ 不算外来工作区
     assert.equal(isForeignWorkspace(real, link, {}), false);
+    assert.ok(sameWorkspace(real, link));
     // 真的是另一个目录 → 外来
-    assert.equal(isForeignWorkspace(real, tmp, {}), true);
+    assert.equal(isForeignWorkspace(real, other, {}), true);
+    assert.ok(!sameWorkspace(real, other));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test("配置落点：实例目录跟着工作区走，配置就写在工作区实例里", () => {
+  // 老版本在这里做过「扫码改道」（避免覆盖全局配置）；0.6.0 没有全局实例了，
+  // 落点天然就是本工作区实例目录，无需改道逻辑。
+  const ws = "/Users/a/other";
+  assert.equal(join(resolveRootDir({}, ws), "config.pi.json"), join(ws, ".pi", "feishu", "config.pi.json"));
+});
+
+test("搬迁后旧全局目录不存在时不会误报（没有 legacy 目录的机器）", () => {
+  const home = mkdtempSync(join(tmpdir(), "feishu-home-"));
+  const ws = join(home, "ws");
+  mkdirSync(ws, { recursive: true });
+  try {
+    const { json, stderr } = probe(CONFIG_PROBE, ws, { ...process.env, HOME: home, DSH_HOME: join(home, "dsh") });
+    assert.equal(json.root, join(realpathSync(ws), ".pi", "feishu"));
+    assert.ok(!/旧全局实例目录/.test(stderr), `不该有迁移提示：${stderr}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("README 提到的实例目录名与实际一致（防止文档漂移）", () => {
+  const readme = readFileSync(join(REPO_ROOT, "README.md"), "utf8");
+  assert.match(readme, /\.pi\/feishu/, "README 应写明实例目录为 <工作区>/.pi/feishu");
 });

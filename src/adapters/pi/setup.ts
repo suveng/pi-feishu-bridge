@@ -1,5 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_CONFIG, ensureRoot, mask, resolveConfigWriteTarget, writeJson } from "../../feishu/config.ts";
+import { CONFIG_PI_PATH, DEFAULT_CONFIG, ensureRoot, mask, writeJson } from "../../feishu/config.ts";
 import { registerFeishuApp } from "../../feishu/app-register.ts";
 import type { Domain, FeishuConfig, GroupPolicy } from "../../feishu/types.ts";
 
@@ -84,15 +84,11 @@ export async function runSetup(ctx: ExtensionCommandContext) {
     reactEmoji: DEFAULT_CONFIG.reactEmoji,
     autoStart: true,
   };
-  // 本目录若不是这份全局实例的属主工作区（典型：在别的目录扫码建应用），
-  // 凭证写进本目录实例目录，不覆盖全局配置，并提示用启动器打开。
-  const target = resolveConfigWriteTarget();
-  writeJson(target.path, config);
+  // 实例目录跟着工作区走，直接写本工作区实例的配置（不存在覆盖别的工作区的问题）。
+  writeJson(CONFIG_PI_PATH, config);
 
   ctx.ui.notify(
-    target.redirectedDir
-      ? `飞书配置已保存到本目录实例 / Feishu config saved to this directory's instance\nPath: ${target.path}\nApp ID: ${mask(appId)}\n群聊策略 / Group policy: ${groupPolicy}\n\n本目录不是这份全局实例的所属工作区，凭证已写入本目录实例目录，未覆盖全局配置。\n请用 ./.pi/pi-feishu.sh 启动本工作区（或先 export FEISHU_DATA_DIR="${target.redirectedDir}"）。`
-      : `飞书配置已保存 / Feishu config saved\nPath: ${target.path}\nApp ID: ${mask(appId)}\n群聊策略 / Group policy: ${groupPolicy}`,
+    `飞书配置已保存 / Feishu config saved\nPath: ${CONFIG_PI_PATH}\nApp ID: ${mask(appId)}\n群聊策略 / Group policy: ${groupPolicy}`,
     "info",
   );
 

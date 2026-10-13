@@ -25,7 +25,7 @@ Bilibili: <https://space.bilibili.com/4489397>
   - `open`: reply directly in groups and topics without an @; you still need to manually enable the "**receive all messages in group chats**" permission for the bot in the Feishu developer console
   - `mention`: reply only when the bot is `@`-mentioned, a keyword matches, or someone replies to a bot message (the latter two are optional)
 - Attachment inputs including images, code files, and text files; image understanding depends on whether the selected model supports images
-- Archive (.zip) attachments are downloaded to a local inbox (`~/.pi/agent/feishu/inbox/<message-id>/`) and the path is passed into the prompt, so the agent can unpack large log bundles itself instead of having them truncated by the context
+- Archive (.zip) attachments are downloaded to a local inbox (`<workspace>/.pi/feishu/inbox/<message-id>/`) and the path is passed into the prompt, so the agent can unpack large log bundles itself instead of having them truncated by the context
 - Parse Feishu interactive alert cards; when replying to a message or card, the original content can be passed to Pi together
 - Group keyword triggers, and follow-up questions by replying to bot messages
 - Switch the model, workspace, past sessions, and thinking level of the current conversation inside Feishu
@@ -65,7 +65,7 @@ After installation, restart dsh. If no Feishu bot configuration is detected, a t
 
 After setup, the bridge starts automatically and connects to Feishu/Lark, and it reconnects automatically every time you start dsh afterwards.
 
-> DSH uses its own config file `~/.dsh/feishu/config.harness.json`, separate from Pi's config — the two can be installed side by side and coexist.
+> DSH uses its own config file name `config.harness.json` (inside the `harness/` subdirectory of the same instance directory), separate from Pi's config — the two can be installed side by side and coexist.
 
 #### 3. Interacting in Feishu
 
@@ -83,7 +83,7 @@ In-chat commands like `/new`, `/resume`, `/model`, `/thinking`, `/stop`, `/works
 Two differences to note:
 
 - DSH offers a trimmed-down set of `/feishu` management commands: `setup / status / autostart / debug / reset`, but no `start / stop / restart` — the bridge starts and stops automatically with dsh, controlled by `autoStart` in the config.
-- DSH environment variables use the `HARNESS_` prefix (e.g. `HARNESS_APP_ID`) instead of Pi's `FEISHU_`; the card callback port also differs by default — Pi uses `3001`, DSH uses `3002`, so both can run side by side without conflicts
+- DSH environment variables use the `HARNESS_` prefix (e.g. `HARNESS_APP_ID`) instead of Pi's `FEISHU_`; the card callback port is derived from the instance directory in both cases (stably `3003-3099`, one per side), so both can run side by side without conflicts
 
 <a id="pi-quick-start"></a>
 
@@ -296,18 +296,19 @@ Difference from Pi: DSH does not provide `/feishu start | stop | restart` — th
 Config is saved by default at:
 
 ```text
-~/.pi/agent/feishu/config.json
+<workspace>/.pi/feishu/config.json
 ```
 
-When `FEISHU_DATA_DIR` is set, everything above moves under that directory (see "Running multiple instances on one machine").
+Since 0.6.0 the instance directory follows the workspace, so there is no global instance any more; set `FEISHU_DATA_DIR` to point it somewhere else explicitly (see "Running multiple instances on one machine").
+If a legacy `~/.pi/agent/feishu` really belongs to this workspace, the bridge moves it here in full on first start and says so in the log.
 
 It can also be configured via environment variables:
 
 | Variable                | Description                            |
 | --------------------- | ----------------------------- |
-| `FEISHU_DATA_DIR`     | Instance data directory: one directory per instance when running multiple instances; config/state/logs/dedupe are all isolated. Unset means the primary instance `~/.pi/agent/feishu` |
+| `FEISHU_DATA_DIR`     | Instance data directory; follows the workspace by default = `<workspace>/.pi/feishu` (usually leave unset); setting it moves everything into that directory |
 | `FEISHU_ALLOW_FOREIGN_WORKSPACE` | Set to `1` to skip the bare-start protection (see "Running Multiple Instances on One Machine"); only when you knowingly want to take over another workspace's bot |
-| `owner-workspace.json` (next to `FEISHU_DATA_DIR`) | Owner workspace record maintained automatically by the bridge (which directory this global config belongs to); edit it by hand only via a manual `/feishu restart` in the target directory |
+| `owner-workspace.json` (inside the instance directory) | Owner workspace record maintained automatically by the bridge (which directory this instance data belongs to); used by the migration and the bare-start protection |
 | `FEISHU_APP_ID`       | Feishu/Lark app ID                 |
 | `FEISHU_APP_SECRET`   | Feishu/Lark app secret                  |
 | `FEISHU_DOMAIN`       | `feishu` or `lark`, default `feishu` |
@@ -320,7 +321,7 @@ It can also be configured via environment variables:
 | `FEISHU_AUTO_START`   | `1` or `0`                     |
 | `FEISHU_CARD_ACTION_MODE` | `webhook` or `ws`, default `webhook` |
 | `FEISHU_CARD_ACTION_WEBHOOK_HOST` | Card callback listen address, default `0.0.0.0` |
-| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | Card callback port, default `3001` (DSH uses `HARNESS_CARD_ACTION_WEBHOOK_PORT`, default `3002`; with `FEISHU_DATA_DIR` it is derived from the instance directory into `3003-3099`) |
+| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | Card callback port, derived from the instance directory (stably within `3003-3099`; DSH uses `HARNESS_CARD_ACTION_WEBHOOK_PORT`, likewise derived); an explicit value wins |
 | `FEISHU_CARD_ACTION_WEBHOOK_PATH` | Card callback path, default `/webhook/card` |
 | `FEISHU_PROMPT_NOTIFY_SEC` | After a long task exceeds this many seconds, send a "still processing" notice in Feishu, default `180`, `0` disables |
 | `FEISHU_PROMPT_TIMEOUT_SEC` | Hard timeout in seconds; the task is aborted and reported failed on timeout, default `0` (no hard timeout — even long-running tasks won't be reported failed) |
@@ -347,7 +348,7 @@ In addition to the environment variables above, you can also set these in `confi
 
 ### Runtime settings
 
-The following bridge settings can be changed instantly with `/config` **in a direct message with the bot** — no restart needed — and are saved to `~/.pi/agent/feishu/runtime-overrides.json`:
+The following bridge settings can be changed instantly with `/config` **in a direct message with the bot** — no restart needed — and are saved to `runtime-overrides.json` inside the instance directory (`<workspace>/.pi/feishu/` for Pi, `<workspace>/.pi/feishu/harness/` for DSH):
 
 ```text
 /config
@@ -366,37 +367,33 @@ The hot-updatable scope only includes `groupPolicy`, `groupKeywords`, `groupAlso
 
 **Hard prerequisite: one bot per workspace (each with its own `appId`).** Feishu long connections are clustered and **do not broadcast** — even if one app opens several connections, each event is delivered to only one of them at random. Two instances sharing one `appId` will fight over the connection (you will see `system busy` in the logs) and messages will randomly land in the wrong workspace. The connection lock is mutually exclusive per `appId` precisely to block that misconfiguration.
 
-**Bare-start protection**: with `FEISHU_DATA_DIR` unset, if this global config does **not** belong to the current directory, the bridge **refuses to auto-start**, marks the status bar as "connection belongs to another workspace" and shows a one-time notice — so opening a new workspace cannot steal the primary workspace's bot. Belonging is decided from two sources; either one pointing elsewhere counts as foreign:
-
-1. the **cwd of the connection lock's current owner** (available while a daemon runs);
-2. the **owner workspace record** `~/.pi/agent/feishu/owner-workspace.json` — every successful connection records the workspace it ran in, so even after the original workspace's daemon stopped and the lock is free, a bare start from another directory is still blocked (since 0.5.2).
-
-To take over temporarily in this directory, set `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`, or run `/feishu restart` manually here (manual commands bypass this protection and update the owner record).
-
-**QR setup redirect (0.5.3)**: in such a foreign directory, creating a bot by QR code (or saving the config) writes the credentials to **this directory's own instance directory** `<cwd>/.pi/feishu/config.pi.json` instead of overwriting the global config, and tells you to start with `./.pi/pi-feishu.sh`. So even a bare-started QR setup will not swap out the primary workspace's bot.
-
-Isolation is done by giving each extra instance its own data directory:
+**The instance directory follows the workspace (since 0.6.0)**: no environment variable needed — every workspace naturally uses its own `<workspace>/.pi/feishu`, and config, state, logs, dedupe and attachments belong to that workspace only. There is **no global instance** any more.
 
 ```bash
-# Workspace A (primary): leave FEISHU_DATA_DIR unset, keeps using ~/.pi/agent/feishu
+# Workspace A: just start
 cd ~/work/a && pi
 
-# Workspace B (second instance): own directory + own bot
-cd ~/work/b
-export FEISHU_DATA_DIR="$PWD/.pi/feishu"
-export FEISHU_APP_ID="cli_second_app"
-export FEISHU_APP_SECRET="second_app_secret"
-pi
+# Workspace B: just start (each bot's credentials live in its own .pi/feishu)
+cd ~/work/b && pi
 ```
 
-Setting `FEISHU_DATA_DIR` isolates automatically:
+> Upgrade note: older versions used `~/.pi/agent/feishu` as the global primary instance. After the upgrade, the first start inside a workspace moves that legacy data in **in full** if it really belongs to this workspace (owner record or lock owner points here); if it belongs to another workspace, the bridge only prints a notice and never moves it. You can still point it elsewhere with `FEISHU_DATA_DIR`.
+
+**Bare-start protection**: if a workspace would end up sharing another workspace's bot (e.g. `FEISHU_DATA_DIR` pointing at someone else's instance), the bridge **refuses to auto-start**, marks the status bar as "connection belongs to another workspace" and shows a one-time notice. Belonging is decided from:
+
+1. the **cwd of the connection lock's current owner** (available while a daemon runs);
+2. the **owner workspace record** (`owner-workspace.json` inside the instance directory) — every successful connection records the workspace it ran in, so it also holds while the owner's daemon is stopped and the lock is free.
+
+To take over temporarily, set `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`, or run `/feishu restart` manually here (manual commands bypass this protection and update the owner record).
+
+Instance directory layout (default `<workspace>/.pi/feishu`):
 
 | Item | Isolated location |
 | --- | --- |
-| `config.pi.json` / `state.pi.json` / `bridge.pi.json` / `debug.pi.log` / `daemon.log` / `runtime-overrides.json` | `$FEISHU_DATA_DIR/` |
-| Attachment inbox | `$FEISHU_DATA_DIR/inbox/` |
-| DSH-side files with the same names | `$FEISHU_DATA_DIR/harness/` |
-| Card callback port | Derived from the directory, stably within `3003-3099` |
+| `config.pi.json` / `state.pi.json` / `bridge.pi.json` / `debug.pi.log` / `daemon.log` / `runtime-overrides.json` | `<workspace>/.pi/feishu/` (or `$FEISHU_DATA_DIR/` when set) |
+| Attachment inbox | `<instance dir>/inbox/` |
+| DSH-side files with the same names | `<instance dir>/harness/` |
+| Card callback port | Derived from the instance directory, stably within `3003-3099` |
 
 **The only thing deliberately left global** is the connection lock: `~/.pi/agent/locks.json` (or `~/.dsh/locks.json` in a DSH-only setup). It must be unique machine-wide, otherwise two instances could both claim the same bot.
 
@@ -408,15 +405,17 @@ The callback port is derived stably from the directory: the same directory alway
 
 | Path                               | Content                |
 | -------------------------------- | ----------------- |
-| `~/.pi/agent/feishu/config.json` | Bot credentials and basic config        |
-| `~/.pi/agent/feishu/runtime-overrides.json` | Runtime setting overrides saved via `/config` in DMs |
-| `~/.pi/agent/feishu/state.json`  | Mapping between Feishu chats and Pi sessions    |
-| `~/.pi/agent/feishu/bridge.json` | Routing info for Pi tasks started from Feishu  |
-| `~/.pi/agent/feishu/debug.log`   | Debug log              |
+| `<workspace>/.pi/feishu/config.json` | Bot credentials and basic config        |
+| `<workspace>/.pi/feishu/runtime-overrides.json` | Runtime setting overrides saved via `/config` in DMs |
+| `<workspace>/.pi/feishu/state.json`  | Mapping between Feishu chats and Pi sessions    |
+| `<workspace>/.pi/feishu/bridge.json` | Routing info for Pi tasks started from Feishu  |
+| `<workspace>/.pi/feishu/debug.log`   | Debug log              |
+| `<workspace>/.pi/feishu/daemon.log`  | Daemon stdout log      |
+| `<workspace>/.pi/feishu/owner-workspace.json` | Owner workspace record (used by migration and bare-start protection) |
 | `~/.pi/agent/locks.json`         | Owner lock of the current Feishu connection   |
 | `~/.pi/agent/sessions/`          | Pi session files for each Feishu chat |
 
-> When `FEISHU_DATA_DIR` is set, the `~/.pi/agent/feishu/*` and `~/.dsh/feishu/*` paths above move under that directory (`$FEISHU_DATA_DIR/` and `$FEISHU_DATA_DIR/harness/`); `locks.json` is the only exception and always stays global.
+> The instance directory defaults to `<workspace>/.pi/feishu` (DSH side: `<workspace>/.pi/feishu/harness/`); setting `FEISHU_DATA_DIR` moves the whole table to `$FEISHU_DATA_DIR/`. `locks.json` is the only exception and always stays global — it must be unique, otherwise two instances can claim the same bot.
 
 ***
 
@@ -430,7 +429,7 @@ The callback port is derived stably from the directory: the same directory alway
 - `/workspace` currently only supports absolute paths, or paths starting with `~/`.
 - `/resume` first shows the recent sessions of the current project by default; you can switch to "all sessions" in the card and page through them.
 - Card buttons now prefer webhook response mode; if you want to temporarily keep the older WS update flow, set `FEISHU_CARD_ACTION_MODE` to `ws`.
-- The card callback listens on `0.0.0.0:3001/webhook/card` (Pi) / `0.0.0.0:3002/webhook/card` (DSH) by default; you need to point the interactive card callback URL to an externally reachable URL in the Feishu developer console. Multi-instance setups using `FEISHU_DATA_DIR` instead use a port derived into `3003-3099`.
+- The card callback listens on `0.0.0.0:<derived port>/webhook/card`: the port is derived from the instance directory and stably lands in `3003-3099` (Pi and DSH each get their own, so they never collide). Point the interactive card callback URL to an externally reachable URL in the Feishu developer console; set `FEISHU_CARD_ACTION_WEBHOOK_PORT` to pin a fixed port.
 
 ***
 
@@ -451,8 +450,8 @@ In `open` mode: it can reply directly in groups and topics without an @, but you
 
 ### Two workspaces' bots keep fighting over the connection / messages land in the wrong workspace?
 
-Check whether both instances use the **same `appId`**. Feishu long connections do not broadcast, and multiple connections of one app get randomly split, so you need one self-built app per workspace. Also confirm the two `FEISHU_DATA_DIR` values differ (otherwise config, state, and logs overwrite each other).
+Check whether both instances use the **same `appId`**. Feishu long connections do not broadcast, and multiple connections of one app get randomly split, so you need one self-built app per workspace. Since 0.6.0 the instance data follows the workspace, so two workspaces are isolated by default.
 
-If one workspace has no `FEISHU_DATA_DIR` set, it reads the other's global config and the bare-start protection refuses to auto-start it (status bar: "connection belongs to another workspace"); bypass only with `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`. The protection also holds while the owner workspace's daemon is stopped, because the owner workspace record (`~/.pi/agent/feishu/owner-workspace.json`) remembers which directory this config belongs to.
+Only an explicit `FEISHU_DATA_DIR` pointing both workspaces at the same instance directory causes a clash: the bare-start protection then refuses to auto-start it (status bar: "connection belongs to another workspace"); bypass only with `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`. The protection also holds while the owner workspace's daemon is stopped, because the owner workspace record (`owner-workspace.json` inside the instance directory) remembers which directory this data belongs to.
 
 ### Boot auto-start of the background service is not implemented yet; currently you need to manually start the Pi agent once after the computer boots for it to work properly. Once started, the Pi agent does not need to run in the foreground — even after it is closed, you can still chat in Feishu/Lark.

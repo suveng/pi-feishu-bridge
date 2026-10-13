@@ -25,7 +25,7 @@ B站：<https://space.bilibili.com/4489397>
   - `open`：群里和话题里可直接回复，不需要 @，还需手动在飞书开发者后台开启机器人“**获取群组中所有消息”的权限**
   - `mention`：只有 `@` 机器人、命中关键词或回复机器人消息时才会回复（后两项可选开启）
 - 支持图片、代码文件和文本文件等附件输入；图片识别取决于当前模型是否支持图片
-- 支持压缩包（.zip）附件：下载到本地收件箱（`~/.pi/agent/feishu/inbox/<消息ID>/`）并把路径写进 prompt，由 agent 自行解压读取，避免大日志包被上下文截断
+- 支持压缩包（.zip）附件：下载到本地收件箱（`<工作区>/.pi/feishu/inbox/<消息ID>/`）并把路径写进 prompt，由 agent 自行解压读取，避免大日志包被上下文截断
 - 支持解析飞书 interactive 告警卡片；回复一条消息或卡片时，可把原内容一并带给 Pi
 - 支持群聊关键词触发、回复机器人消息继续追问
 - 支持在飞书内切换当前会话的模型、工作区、历史会话和思考强度
@@ -68,7 +68,7 @@ dsh plugin --profile web add ax-feishu-bridge --ignore-scripts
 
 配置完成后桥接会自动启动并连上飞书/Lark，之后每次启动 dsh 也会自动连接。
 
-> DSH 使用独立的配置文件 `~/.dsh/feishu/config.harness.json`（存放在 dsh 自己的家目录下），与 Pi 的配置互不干扰，两边可以同时安装、共存。
+> DSH 使用独立的配置文件名 `config.harness.json`（放在同一个实例目录的 `harness/` 子目录里），与 Pi 的配置互不干扰，两边可以同时安装、共存。
 
 #### 3. 在飞书里互动
 
@@ -84,7 +84,7 @@ dsh plugin --profile web add ax-feishu-bridge --ignore-scripts
 两点区别需要注意：
 
 - DSH 的 `/feishu` 管理命令是精简版：提供 `setup / status / autostart / debug / reset`，没有 `start / stop / restart`——桥接随 dsh 自动启停，由配置里的 `autoStart` 控制。
-- DSH 的环境变量前缀是 `HARNESS_`（例如 `HARNESS_APP_ID`），而不是 Pi 的 `FEISHU_`；卡片回调端口默认也不同——Pi 默认 `3001`，DSH 默认 `3002`，两边同时启用也不会冲突。
+- DSH 的环境变量前缀是 `HARNESS_`（例如 `HARNESS_APP_ID`），而不是 Pi 的 `FEISHU_`；卡片回调端口也都按实例目录派生到 `3003-3099`（Pi 与 DSH 各占一个），两边同时启用也不会冲突。
 
 <a id="pi-quick-start"></a>
 
@@ -297,18 +297,19 @@ Windows PATH 加入 C:\Program Files\Git\bin
 配置默认保存在：
 
 ```text
-~/.pi/agent/feishu/config.json
+<工作区>/.pi/feishu/config.json
 ```
 
-设了 `FEISHU_DATA_DIR` 时，上路径整体挪到该目录（见下方「同一台机器多开」）。
+实例目录默认跟着工作区走（0.6.0 起），机器上不再有全局实例；设 `FEISHU_DATA_DIR` 可显式改到别处（见下方「同一台机器多开」）。
+若旧版留下的全局 `~/.pi/agent/feishu` 确实属于本工作区，桥接会在首次启动时把它整份搬进本工作区实例目录，并在日志里说明。
 
 也可以通过环境变量配置：
 
 | 变量                    | 说明                            |
 | --------------------- | ----------------------------- |
-| `FEISHU_DATA_DIR`     | 实例数据目录：多开时一个实例一个目录，配置/状态/日志/去重全部隔离；不设即主实例 `~/.pi/agent/feishu` |
+| `FEISHU_DATA_DIR`     | 实例数据目录；默认跟着工作区走 = `<工作区>/.pi/feishu`（一般不用设），设了则整体改用该目录 |
 | `FEISHU_ALLOW_FOREIGN_WORKSPACE` | 设为 `1` 时跳过「裸开保护」（见下方「同一台机器多开」）；仅在自己知道在干什么、要临时接管另一个工作区的机器人时才用 |
-| `FEISHU_DATA_DIR` 同级的 `owner-workspace.json` | 桥接自动维护的属主工作区记录（记这份全局配置属于哪个目录），不用手改；想换属主就在目标目录手动 `/feishu restart` |
+| 实例目录下的 `owner-workspace.json` | 桥接自动维护的属主工作区记录（记这份实例数据属于哪个目录），不用手改；搬迁判断与裸开保护都用它 |
 | `FEISHU_APP_ID`       | 飞书/Lark 应用 ID                 |
 | `FEISHU_APP_SECRET`   | 飞书/Lark 应用密钥                  |
 | `FEISHU_DOMAIN`       | `feishu` 或 `lark`，默认 `feishu` |
@@ -321,7 +322,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 | `FEISHU_AUTO_START`   | `1` 或 `0`                     |
 | `FEISHU_CARD_ACTION_MODE` | `webhook` 或 `ws`，默认 `webhook` |
 | `FEISHU_CARD_ACTION_WEBHOOK_HOST` | 卡片回调监听地址，默认 `0.0.0.0` |
-| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | 卡片回调端口，默认 `3001`（DSH 用 `HARNESS_CARD_ACTION_WEBHOOK_PORT`，默认 `3002`；设了 `FEISHU_DATA_DIR` 则按实例目录派生到 `3003-3099`） |
+| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | 卡片回调端口，按实例目录派生（稳定落在 `3003-3099`；DSH 用 `HARNESS_CARD_ACTION_WEBHOOK_PORT`，同样派生）；显式设置时优先 |
 | `FEISHU_CARD_ACTION_WEBHOOK_PATH` | 卡片回调路径，默认 `/webhook/card` |
 | `FEISHU_PROMPT_NOTIFY_SEC` | 长任务超过多少秒后在飞书发一条“仍在处理中”提示，默认 `180`，`0` 关闭 |
 | `FEISHU_PROMPT_TIMEOUT_SEC` | 任务硬超时秒数，超时后中止任务并报失败，默认 `0`（不设硬超时，长期运行也不会被报失败） |
@@ -351,7 +352,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 
 ### 运行时配置
 
-以下桥接设置可以在**与机器人的私聊**里用 `/config` 立即修改，无需重启，并保存到各自平台数据目录下的 `runtime-overrides.json`（Pi 为 `~/.pi/agent/feishu/`，DSH 为 `~/.dsh/feishu/`）：
+以下桥接设置可以在**与机器人的私聊**里用 `/config` 立即修改，无需重启，并保存到各自实例目录下的 `runtime-overrides.json`（Pi 为 `<工作区>/.pi/feishu/`，DSH 为 `<工作区>/.pi/feishu/harness/`）：
 
 ```text
 /config
@@ -373,43 +374,39 @@ Windows PATH 加入 C:\Program Files\Git\bin
 会互相抢连接（日志里会出现 `system busy`），并让消息随机落到错误的工作区。
 连接锁按 `appId` 全局互斥，就是为了拦住这种误配。
 
-**裸开保护**：不设 `FEISHU_DATA_DIR` 时若发现这份全局配置**不属于本目录**，桥接会**拒绝自动启动**，
-状态栏显示「连接属于其他工作区」，并在会话启动时弹一次提示 —— 避免新工作区一打开就把主工作区的机器人顶掉。
-归属判据有两个来源，任一指向别的目录就算外来：
-
-1. **连接锁当前 owner 的 cwd**（有 daemon 在跑时有效）；
-2. **属主工作区记录** `~/.pi/agent/feishu/owner-workspace.json` —— 每次成功连上都会把当时的工作区记进去，
-   所以即使原工作区的 daemon 停了、锁空着，另一个目录裸开也会被拦住（0.5.2 起）。
-
-确需在本目录临时接管时，设 `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`，或在本目录手动 `/feishu restart`
-（手动命令不受本保护限制，并会把这目录更新为新的属主）。
-
-**扫码改道（0.5.3）**：在上述「外来目录」里扫码建应用或保存配置时，凭证**自动写进本目录的实例目录**
-`<本目录>/.pi/feishu/config.pi.json`，**不覆盖全局配置**，并提示用 `./.pi/pi-feishu.sh` 启动。
-所以哪怕是裸开进去扫码的，主工作区的机器人也不会被换掉。
-
-隔离方式是给每个额外实例设一个数据目录：
+**实例目录跟着工作区走（0.6.0 起）**：不需要设任何环境变量 —— 每个工作区天然用自己的
+`<工作区>/.pi/feishu`，配置、状态、日志、去重、附件都只认本工作区，机器上**不再有全局实例**。
 
 ```bash
-# 工作区 A（主实例）：不设 FEISHU_DATA_DIR，沿用 ~/.pi/agent/feishu
+# 工作区 A：直接用
 cd ~/work/a && pi
 
-# 工作区 B（第二实例）：独立目录 + 独立机器人
-cd ~/work/b
-export FEISHU_DATA_DIR="$PWD/.pi/feishu"
-export FEISHU_APP_ID="cli_第二应用"
-export FEISHU_APP_SECRET="第二应用密钥"
-pi
+# 工作区 B：直接用（各自的机器人凭证写在各自的 .pi/feishu 里）
+cd ~/work/b && pi
 ```
 
-设了 `FEISHU_DATA_DIR` 之后自动隔离：
+> 升级说明：旧版把 `~/.pi/agent/feishu` 当全局主实例。升级后首次在某个工作区启动时，
+> 如果那份旧数据确实属于这个工作区（属主记录或锁 owner 指向它），会**整份搬进**本工作区实例目录；
+> 不属于本工作区时只打印一句提示，绝不搬走别人的数据。想手工指到别处仍可设 `FEISHU_DATA_DIR`。
+
+**裸开保护**：万一某个工作区共用别人的机器人（例如显式 `FEISHU_DATA_DIR` 指到了别处的实例），
+桥接会**拒绝自动启动**，状态栏显示「连接属于其他工作区」，并在会话启动时弹一次提示。归属判据：
+
+1. **连接锁当前 owner 的 cwd**（有 daemon 在跑时有效）；
+2. **属主工作区记录**（实例目录下的 `owner-workspace.json`）—— 每次成功连上都会记下当时的工作区，
+   所以原 daemon 停了、锁空着也拦得住。
+
+确需临时接管时，设 `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`，或在本目录手动 `/feishu restart`
+（手动命令不受本保护限制，并会把这目录更新为新的属主）。
+
+实例目录布局（默认 `<工作区>/.pi/feishu`）：
 
 | 项 | 隔离后的位置 |
 | --- | --- |
-| `config.pi.json` / `state.pi.json` / `bridge.pi.json` / `debug.pi.log` / `daemon.log` / `runtime-overrides.json` | `$FEISHU_DATA_DIR/` |
-| 附件收件箱 | `$FEISHU_DATA_DIR/inbox/` |
-| DSH 侧同名文件 | `$FEISHU_DATA_DIR/harness/` |
-| 卡片回调端口 | 由目录派生，稳定落在 `3003-3099` |
+| `config.pi.json` / `state.pi.json` / `bridge.pi.json` / `debug.pi.log` / `daemon.log` / `runtime-overrides.json` | `<工作区>/.pi/feishu/`（设了 `FEISHU_DATA_DIR` 则为 `$FEISHU_DATA_DIR/`） |
+| 附件收件箱 | `<实例目录>/inbox/` |
+| DSH 侧同名文件 | `<实例目录>/harness/` |
+| 卡片回调端口 | 由实例目录派生，稳定落在 `3003-3099` |
 
 **故意不隔离的**只有连接锁：`~/.pi/agent/locks.json`（纯 DSH 环境为 `~/.dsh/locks.json`）。
 它必须全局唯一，否则两个实例都能抢到同一个机器人。
@@ -424,18 +421,20 @@ pi
 
 | 路径                               | 内容                |
 | -------------------------------- | ----------------- |
-| `~/.pi/agent/feishu/config.json` | 机器人凭证和基础配置        |
-| `~/.pi/agent/feishu/runtime-overrides.json` | 通过私聊 `/config` 保存的运行时配置覆盖 |
-| `~/.pi/agent/feishu/state.json`  | 飞书会话和 Pi 会话的映射    |
-| `~/.pi/agent/feishu/bridge.json` | 从飞书发起的 Pi 任务路由信息  |
-| `~/.pi/agent/feishu/debug.log`   | 调试日志              |
-| `~/.pi/agent/locks.json`         | 当前飞书连接的 owner 锁   |
+| `<工作区>/.pi/feishu/config.json` | 机器人凭证和基础配置        |
+| `<工作区>/.pi/feishu/runtime-overrides.json` | 通过私聊 `/config` 保存的运行时配置覆盖 |
+| `<工作区>/.pi/feishu/state.json`  | 飞书会话和 Pi 会话的映射    |
+| `<工作区>/.pi/feishu/bridge.json` | 从飞书发起的 Pi 任务路由信息  |
+| `<工作区>/.pi/feishu/debug.log`   | 调试日志              |
+| `<工作区>/.pi/feishu/daemon.log`  | daemon 标准输出日志        |
+| `<工作区>/.pi/feishu/owner-workspace.json` | 属主工作区记录（搬迁与裸开保护用来判断这份数据属于谁） |
+| `~/.pi/agent/locks.json`         | 当前飞书连接的 owner 锁（故意全局唯一）   |
 | `~/.pi/agent/sessions/`          | 每个飞书会话对应的 Pi 会话文件 |
-| `~/.dsh/feishu/`                 | DSH 侧的配置、状态与日志（仅安装 DSH 时产生；未装 Pi 的机器不会创建 `~/.pi`） |
+| `<工作区>/.pi/feishu/harness/`    | DSH 侧的配置、状态与日志（仅安装 DSH 时产生） |
 
 > 连接锁选址：机器上装有 Pi（存在 `~/.pi/agent` 目录）时沿用 `~/.pi/agent/locks.json`，保证两边能协商同一个机器人的连接；纯 DSH 环境则使用 `~/.dsh/locks.json`。
 
-> 设了 `FEISHU_DATA_DIR` 时，上表中 `~/.pi/agent/feishu/*` 与 `~/.dsh/feishu/*` 的路径整体挪到该目录下（`$FEISHU_DATA_DIR/` 与 `$FEISHU_DATA_DIR/harness/`）；只有 `locks.json` 例外，它始终留在全局。
+> 实例目录默认是 `<工作区>/.pi/feishu`（DSH 侧为 `<工作区>/.pi/feishu/harness/`）；设了 `FEISHU_DATA_DIR` 时整表挪到 `$FEISHU_DATA_DIR/`。只有 `locks.json` 例外，它始终留在全局 —— 必须全局唯一，否则两个实例都能抢到同一个机器人。
 
 ***
 
@@ -451,7 +450,7 @@ pi
 - `/workspace` 当前只支持绝对路径，或 `~/` 开头的路径。
 - `/resume` 默认先显示当前项目的最近历史会话，也可以在卡片里切到“全部会话”并翻页浏览。
 - 卡片按钮现在优先走 webhook 回包模式；如果你还想临时沿用旧的 WS 更新方式，可以把 `FEISHU_CARD_ACTION_MODE` 设成 `ws`。
-- 卡片回调默认监听 `0.0.0.0:3001/webhook/card`（Pi）/ `0.0.0.0:3002/webhook/card`（DSH），需要在飞书开发者后台把交互卡片回调地址指到一个外部可访问的 URL。设了 `FEISHU_DATA_DIR` 的多实例会改成 `3003-3099` 中按目录派生的端口。
+- 卡片回调默认监听 `0.0.0.0:<派生端口>/webhook/card`：端口按实例目录稳定派生到 `3003-3099`（Pi 与 DSH 各占一个，互不冲突），需要在飞书开发者后台把交互卡片回调地址指到一个外部可访问的 URL；要固定端口就显式设 `FEISHU_CARD_ACTION_WEBHOOK_PORT`。
 
 ***
 
@@ -472,8 +471,7 @@ pi
 
 ### 两个工作区的机器人互相抢连接 / 消息落错工作区？
 
-看是不是两个实例用了**同一个 `appId`**。飞书长连接不广播，同一应用的多条连接会随机分流，必须一个工作区一个自建应用；同时确认两边的 `FEISHU_DATA_DIR` 不同（否则配置、状态、日志会互相覆盖）。
-若 B 工作区没设 `FEISHU_DATA_DIR` 就打开，它读到的就是 A 的全局配置，此时桥接的「裸开保护」会拒绝自动启动并把状态栏标成「连接属于其他工作区」（要强行接管才需 `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`）。
-A 的 daemon 没在跑时也拦得住 —— 属主工作区记录（`~/.pi/agent/feishu/owner-workspace.json`）记住了这份配置属于 A。
+看是不是两个实例用了**同一个 `appId`**。飞书长连接不广播，同一应用的多条连接会随机分流，必须一个工作区一个自建应用。0.6.0 起实例数据默认跟着工作区走，正常情况下两个工作区天然互不干扰。
+只有在显式设了 `FEISHU_DATA_DIR`、把两个工作区指到同一个实例目录时才会撞车：此时桥接的「裸开保护」会拒绝自动启动并把状态栏标成「连接属于其他工作区」（要强行接管才需 `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`）；原 daemon 没在跑时也拦得住 —— 属主工作区记录（实例目录下的 `owner-workspace.json`）记住了这份数据属于哪个目录。
 
 ### 还没有实现后台服务开机自启动功能，目前需要电脑开机后手动启动一次 Pi agent 才能正常工作。启动后，Pi agent 无需前台运行，关闭后，仍可以在飞书/Lark 里对话。
