@@ -609,6 +609,16 @@ export function reapDetachedDaemonProcesses(options: { keepPids?: number[]; exte
   // 会把另一个工作区的 daemon 一起 SIGTERM。见 gateway-lock.readAllGatewayOwnerPids。
   const keep = new Set([...(options.keepPids || []), ...readAllGatewayOwnerPids()]);
   const allProcesses = listProcesses();
+
+  // daemon 的启动壳（`bash -lc 'tail -f /dev/null | exec pi ...'`）与喂 stdin 的 tail 都不持锁，
+  // 只锁住 pi 真身不够：壳被回收会连带 tail（管道写端关闭 → pi 的 stdin 直接 EOF）。
+  // 所以把每个被锁认领的 pid 的**直接父进程**一并保留 —— 壳进了 keep，它的后代就不再被遍历。
+  const parentOf = new Map(allProcesses.map((proc) => [proc.pid, proc.ppid]));
+  for (const pid of [...keep]) {
+    const parent = parentOf.get(pid);
+    if (parent && parent > 1) keep.add(parent);
+  }
+
   const roots = allProcesses.filter((proc) => looksLikeFeishuDaemon(proc.command, options.extensionPath));
   if (!roots.length) return;
 
