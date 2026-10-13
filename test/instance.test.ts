@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,9 @@ import {
   DEFAULT_ROOT_DIR,
   instanceWebhookPort,
   isForeignWorkspace,
+  ownerWorkspacePath,
+  readOwnerWorkspace,
+  writeOwnerWorkspace,
   resolveHarnessRoot,
   resolveInstanceDir,
   resolveRootDir,
@@ -120,6 +123,44 @@ test("裸开保护：已做实例隔离时不适用（各用各的）", () => {
 test("裸开保护：FEISHU_ALLOW_FOREIGN_WORKSPACE=1 可显式放行", () => {
   const env = { FEISHU_ALLOW_FOREIGN_WORKSPACE: "1" };
   assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/other", env), false);
+});
+
+test("裸开保护：记录里的属主是另一个目录 → 锁空闲时也判为外来（0.5.2 新增）", () => {
+  // 上一版的漏洞：本工作区 daemon 一停，锁就空了，别的目录裸开就会把连接接走；
+  // 有了属主记录，即便锁里没有 owner 也能分辨出这份配置属于谁。
+  assert.equal(isForeignWorkspace(undefined, "/Users/a/other", {}, "/Users/a/proj"), true);
+  assert.equal(isForeignWorkspace(undefined, "/Users/a/proj", {}, "/Users/a/proj/"), false);
+  // 锁 owner 与记录都指向本目录 → 放行
+  assert.equal(isForeignWorkspace("/Users/a/proj", "/Users/a/proj", {}, "/Users/a/proj"), false);
+  // 锁 owner 是别处、记录是本目录 → 仍拦截（先到先得的那一方占着锁）
+  assert.equal(isForeignWorkspace("/Users/a/other", "/Users/a/proj", {}, "/Users/a/proj"), true);
+  // 两个来源都没有 → 首次运行，放行
+  assert.equal(isForeignWorkspace(undefined, "/Users/a/proj", {}, undefined), false);
+});
+
+test("属主工作区记录：写入后可读回，落在实例根目录，损坏/缺失都不抛错", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "feishu-owner-"));
+  const env = { FEISHU_DATA_DIR: tmp };
+  try {
+    // 未写过 → undefined（不抛）
+    assert.equal(readOwnerWorkspace(env), undefined);
+    mkdirSync(join(tmp, "proj-a"), { recursive: true });
+    writeOwnerWorkspace(join(tmp, "proj-a"), env);
+    assert.equal(ownerWorkspacePath(env), join(tmp, "owner-workspace.json"));
+    assert.ok(existsSync(ownerWorkspacePath(env)), "记录文件应写在实例根目录");
+    assert.equal(readOwnerWorkspace(env), realpathSync(join(tmp, "proj-a")));
+    // 目标目录还不存在时退回 resolve（不因 realpath 失败而拒绝写）
+    writeOwnerWorkspace(join(tmp, "proj-b", "nested"), env);
+    assert.equal(readOwnerWorkspace(env), join(tmp, "proj-b", "nested"));
+    // 损坏的 JSON → undefined（不抛）
+    writeFileSync(ownerWorkspacePath(env), "{ 不是 json", "utf8");
+    assert.equal(readOwnerWorkspace(env), undefined);
+    // 空 cwd 字段 → undefined
+    writeFileSync(ownerWorkspacePath(env), JSON.stringify({ cwd: "  " }), "utf8");
+    assert.equal(readOwnerWorkspace(env), undefined);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("裸开保护：软链目录与真实目录视为同一处（realpath 归一化）", () => {

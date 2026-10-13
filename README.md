@@ -308,6 +308,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 | --------------------- | ----------------------------- |
 | `FEISHU_DATA_DIR`     | 实例数据目录：多开时一个实例一个目录，配置/状态/日志/去重全部隔离；不设即主实例 `~/.pi/agent/feishu` |
 | `FEISHU_ALLOW_FOREIGN_WORKSPACE` | 设为 `1` 时跳过「裸开保护」（见下方「同一台机器多开」）；仅在自己知道在干什么、要临时接管另一个工作区的机器人时才用 |
+| `FEISHU_DATA_DIR` 同级的 `owner-workspace.json` | 桥接自动维护的属主工作区记录（记这份全局配置属于哪个目录），不用手改；想换属主就在目标目录手动 `/feishu restart` |
 | `FEISHU_APP_ID`       | 飞书/Lark 应用 ID                 |
 | `FEISHU_APP_SECRET`   | 飞书/Lark 应用密钥                  |
 | `FEISHU_DOMAIN`       | `feishu` 或 `lark`，默认 `feishu` |
@@ -372,10 +373,16 @@ Windows PATH 加入 C:\Program Files\Git\bin
 会互相抢连接（日志里会出现 `system busy`），并让消息随机落到错误的工作区。
 连接锁按 `appId` 全局互斥，就是为了拦住这种误配。
 
-**裸开保护**：不设 `FEISHU_DATA_DIR` 时若发现连接锁属于**另一个目录**（即本目录正在复用别人的
-全局配置 / 同一个机器人），桥接会**拒绝自动启动**，状态栏显示「连接属于其他工作区」，
-并在会话启动时弹一次提示 —— 避免新工作区一打开就把主工作区的机器人顶掉。
-确需在本目录临时接管时，设 `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`。
+**裸开保护**：不设 `FEISHU_DATA_DIR` 时若发现这份全局配置**不属于本目录**，桥接会**拒绝自动启动**，
+状态栏显示「连接属于其他工作区」，并在会话启动时弹一次提示 —— 避免新工作区一打开就把主工作区的机器人顶掉。
+归属判据有两个来源，任一指向别的目录就算外来：
+
+1. **连接锁当前 owner 的 cwd**（有 daemon 在跑时有效）；
+2. **属主工作区记录** `~/.pi/agent/feishu/owner-workspace.json` —— 每次成功连上都会把当时的工作区记进去，
+   所以即使原工作区的 daemon 停了、锁空着，另一个目录裸开也会被拦住（0.5.2 起）。
+
+确需在本目录临时接管时，设 `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`，或在本目录手动 `/feishu restart`
+（手动命令不受本保护限制，并会把这目录更新为新的属主）。
 
 隔离方式是给每个额外实例设一个数据目录：
 
@@ -463,5 +470,6 @@ pi
 
 看是不是两个实例用了**同一个 `appId`**。飞书长连接不广播，同一应用的多条连接会随机分流，必须一个工作区一个自建应用；同时确认两边的 `FEISHU_DATA_DIR` 不同（否则配置、状态、日志会互相覆盖）。
 若 B 工作区没设 `FEISHU_DATA_DIR` 就打开，它读到的就是 A 的全局配置，此时桥接的「裸开保护」会拒绝自动启动并把状态栏标成「连接属于其他工作区」（要强行接管才需 `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`）。
+A 的 daemon 没在跑时也拦得住 —— 属主工作区记录（`~/.pi/agent/feishu/owner-workspace.json`）记住了这份配置属于 A。
 
 ### 还没有实现后台服务开机自启动功能，目前需要电脑开机后手动启动一次 Pi agent 才能正常工作。启动后，Pi agent 无需前台运行，关闭后，仍可以在飞书/Lark 里对话。

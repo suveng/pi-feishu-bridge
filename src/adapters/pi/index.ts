@@ -11,7 +11,7 @@ import { FeishuBridgeRuntime } from "../../feishu/bridge-runtime.ts";
 import { FeishuBridgeStore } from "../../feishu/bridge-store.ts";
 import { FeishuDelivery } from "../../feishu/delivery.ts";
 import { acquireGatewayLock, gatewayLockPath, readAllGatewayOwnerPids, readGatewayOwner, type GatewayLockHandle, type GatewayOwner } from "../../feishu/gateway-lock.ts";
-import { isForeignWorkspace } from "../../feishu/instance.ts";
+import { isForeignWorkspace, readOwnerWorkspace, writeOwnerWorkspace } from "../../feishu/instance.ts";
 import { FeishuMessageHandler } from "../../feishu/message-handler.ts";
 import { runSetup, uiConfirm } from "./setup.ts";
 import {
@@ -238,6 +238,10 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
       updateStatus("owned");
       return { status: "owned" as const, owner: lockResult.owner };
     }
+    // 拿锁成功 = 本目录正式成为这份实例的属主工作区（写进 owner-workspace.json）。
+    // 这份记录让「裸开保护」在锁空闲时也能分辨归属：否则本工作区 daemon 一停，
+    // 别的目录裸开就会把连接接过去（锁里没有 owner 可对比）。
+    writeOwnerWorkspace(process.cwd());
     gatewayLock = lockResult.handle;
     gatewayLock.setOnLost(async () => {
       await transport?.stop();
@@ -587,8 +591,9 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     // 裸开保护：未做实例隔离且这把锁属于**另一个目录**时，拒绝自动启动 ——
     // 否则会顶掉别的工作区的机器人连接（飞书长连接不广播，消息会随机落到错的工作区）。
     const foreignOwner = currentGatewayOwner();
-    if (isForeignWorkspace(foreignOwner?.cwd)) {
-      foreignWorkspaceOwner = foreignOwner!.cwd;
+    const recordedOwner = readOwnerWorkspace();
+    if (isForeignWorkspace(foreignOwner?.cwd, process.cwd(), process.env, recordedOwner)) {
+      foreignWorkspaceOwner = foreignOwner?.cwd ?? recordedOwner!;
       console.error(
         `[feishu] 本目录不是该机器人的所属工作区，已跳过自动启动：owner cwd=${foreignWorkspaceOwner}，本目录=${process.cwd()}。` +
           " 要多开请设 FEISHU_DATA_DIR 并配另一个自建应用；FEISHU_ALLOW_FOREIGN_WORKSPACE=1 可强制接管。",

@@ -306,6 +306,8 @@ It can also be configured via environment variables:
 | Variable                | Description                            |
 | --------------------- | ----------------------------- |
 | `FEISHU_DATA_DIR`     | Instance data directory: one directory per instance when running multiple instances; config/state/logs/dedupe are all isolated. Unset means the primary instance `~/.pi/agent/feishu` |
+| `FEISHU_ALLOW_FOREIGN_WORKSPACE` | Set to `1` to skip the bare-start protection (see "Running Multiple Instances on One Machine"); only when you knowingly want to take over another workspace's bot |
+| `owner-workspace.json` (next to `FEISHU_DATA_DIR`) | Owner workspace record maintained automatically by the bridge (which directory this global config belongs to); edit it by hand only via a manual `/feishu restart` in the target directory |
 | `FEISHU_APP_ID`       | Feishu/Lark app ID                 |
 | `FEISHU_APP_SECRET`   | Feishu/Lark app secret                  |
 | `FEISHU_DOMAIN`       | `feishu` or `lark`, default `feishu` |
@@ -363,6 +365,13 @@ The hot-updatable scope only includes `groupPolicy`, `groupKeywords`, `groupAlso
 ## Running Multiple Instances on One Machine (multiple workspaces / bots)
 
 **Hard prerequisite: one bot per workspace (each with its own `appId`).** Feishu long connections are clustered and **do not broadcast** — even if one app opens several connections, each event is delivered to only one of them at random. Two instances sharing one `appId` will fight over the connection (you will see `system busy` in the logs) and messages will randomly land in the wrong workspace. The connection lock is mutually exclusive per `appId` precisely to block that misconfiguration.
+
+**Bare-start protection**: with `FEISHU_DATA_DIR` unset, if this global config does **not** belong to the current directory, the bridge **refuses to auto-start**, marks the status bar as "connection belongs to another workspace" and shows a one-time notice — so opening a new workspace cannot steal the primary workspace's bot. Belonging is decided from two sources; either one pointing elsewhere counts as foreign:
+
+1. the **cwd of the connection lock's current owner** (available while a daemon runs);
+2. the **owner workspace record** `~/.pi/agent/feishu/owner-workspace.json` — every successful connection records the workspace it ran in, so even after the original workspace's daemon stopped and the lock is free, a bare start from another directory is still blocked (since 0.5.2).
+
+To take over temporarily in this directory, set `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`, or run `/feishu restart` manually here (manual commands bypass this protection and update the owner record).
 
 Isolation is done by giving each extra instance its own data directory:
 
@@ -441,5 +450,7 @@ In `open` mode: it can reply directly in groups and topics without an @, but you
 ### Two workspaces' bots keep fighting over the connection / messages land in the wrong workspace?
 
 Check whether both instances use the **same `appId`**. Feishu long connections do not broadcast, and multiple connections of one app get randomly split, so you need one self-built app per workspace. Also confirm the two `FEISHU_DATA_DIR` values differ (otherwise config, state, and logs overwrite each other).
+
+If one workspace has no `FEISHU_DATA_DIR` set, it reads the other's global config and the bare-start protection refuses to auto-start it (status bar: "connection belongs to another workspace"); bypass only with `FEISHU_ALLOW_FOREIGN_WORKSPACE=1`. The protection also holds while the owner workspace's daemon is stopped, because the owner workspace record (`~/.pi/agent/feishu/owner-workspace.json`) remembers which directory this config belongs to.
 
 ### Boot auto-start of the background service is not implemented yet; currently you need to manually start the Pi agent once after the computer boots for it to work properly. Once started, the Pi agent does not need to run in the foreground — even after it is closed, you can still chat in Feishu/Lark.

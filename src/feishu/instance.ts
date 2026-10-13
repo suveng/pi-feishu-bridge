@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 /**
  * 多实例（同一台机器上跑多个工作区 / 多个机器人）的路径与端口解析。
@@ -96,15 +96,57 @@ function normalizeDir(dir: string): string {
  * 两个实例共用同一个 appId 会互相抢连接，并让消息随机落到错的工作区，
  * 因此调用方应拒绝自动启动，改为提示用户走实例目录 + 独立自建应用。
  *
- * 确需在别的目录临时接管时，设 `FEISHU_ALLOW_FOREIGN_WORKSPACE=1` 显式放行。
+ * 判据有两个来源，任一指向别的目录就算外来：
+ * 1. 连接锁当前 owner 的 cwd（锁被持时有效）；
+ * 2. 属主工作区记录（`owner-workspace.json`）—— 锁空闲时靠它才能分辨归属。
+ *
+ * 确需在别的目录临时接管时，设 `FEISHU_ALLOW_FOREIGN_WORKSPACE=1` 显式放行，
+ * 或在那个目录手动 `/feishu restart`（手动操作不受本保护限制，并会更新属主记录）。
  */
 export function isForeignWorkspace(
   ownerCwd: string | undefined | null,
   cwd: string = process.cwd(),
   env: NodeJS.ProcessEnv = process.env,
+  recordedOwnerCwd?: string | null,
 ): boolean {
   if (resolveInstanceDir(env)) return false;
   if (env.FEISHU_ALLOW_FOREIGN_WORKSPACE === "1") return false;
-  if (!ownerCwd?.trim()) return false;
-  return normalizeDir(ownerCwd) !== normalizeDir(cwd);
+  const mine = normalizeDir(cwd);
+  const owners = [ownerCwd, recordedOwnerCwd].filter((value): value is string => Boolean(value?.trim()));
+  if (owners.length === 0) return false;
+  return owners.some((owner) => normalizeDir(owner) !== mine);
+}
+
+/** 属主工作区记录文件名（放在实例根目录下）：标明这份实例属于哪个工作区。 */
+export const OWNER_WORKSPACE_FILE = "owner-workspace.json";
+
+/** 属主工作区记录文件的完整路径。 */
+export function ownerWorkspacePath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(resolveRootDir(env), OWNER_WORKSPACE_FILE);
+}
+
+/**
+ * 读属主工作区记录（缺文件 / 格式不对 / 字段为空都返回 `undefined`）。
+ * 这份记录是「裸开保护」在锁空闲时的唯一判据：连接锁只记录了*当前*持有者，
+ * 而记录记的是这份配置**长期属于谁**。
+ */
+export function readOwnerWorkspace(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(ownerWorkspacePath(env), "utf8")) as { cwd?: unknown };
+    return typeof parsed.cwd === "string" && parsed.cwd.trim() ? parsed.cwd : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 把当前目录认领为属主工作区（连接成功后调用；写失败只意味着少了这道保险，不影响主流程）。 */
+export function writeOwnerWorkspace(cwd: string = process.cwd(), env: NodeJS.ProcessEnv = process.env): void {
+  try {
+    const file = ownerWorkspacePath(env);
+    mkdirSync(dirname(file), { recursive: true });
+    const payload = { cwd: normalizeDir(cwd), updatedAt: new Date().toISOString() };
+    writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  } catch {
+    // 忽略：记录写不进去也不该阻断连接
+  }
 }
