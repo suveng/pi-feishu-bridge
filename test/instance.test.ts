@@ -25,7 +25,15 @@ const NODE = ["--experimental-strip-types", "-e"];
 
 /** 跑一段子进程探针，返回 stdout 解析后的对象（cwd / env 由调用方决定）。 */
 function probe(script: string, cwd: string, env: NodeJS.ProcessEnv, expectStatus = 0): { stdout: string; stderr: string; json?: any } {
-  const result = spawnSync(process.execPath, [...NODE, script], { cwd, env, encoding: "utf8" });
+  // 默认剥掉 NODE_TEST_CONTEXT：否则探针会被当成测试进程而跳过迁移。
+  // 要模拟「测试进程」本身时传 ALLOW_NODE_TEST_CONTEXT=1（下面会转成 NODE_TEST_CONTEXT=1）。
+  const base = { ...process.env };
+  delete base.NODE_TEST_CONTEXT;
+  const childEnv: NodeJS.ProcessEnv = { ...base, ...env };
+  delete childEnv.NODE_TEST_CONTEXT;
+  if (childEnv.ALLOW_NODE_TEST_CONTEXT === "1") childEnv.NODE_TEST_CONTEXT = "1";
+  delete childEnv.ALLOW_NODE_TEST_CONTEXT;
+  const result = spawnSync(process.execPath, [...NODE, script], { cwd, env: childEnv, encoding: "utf8" });
   assert.equal(result.status, expectStatus, `子进程应退出码 ${expectStatus}，实际 ${result.status}：${result.stderr}`);
   const trimmed = result.stdout.trim();
   return { stdout: result.stdout, stderr: result.stderr, json: trimmed ? JSON.parse(trimmed) : undefined };
@@ -165,7 +173,7 @@ test("迁移：旧全局目录的属主是别的工作区 → 不动它，只打
     const { json, stderr } = probe(CONFIG_PROBE, ws, { ...process.env, HOME: home, DSH_HOME: join(home, "dsh") });
     assert.ok(existsSync(join(legacy, "config.pi.json")), "别的工作区的数据必须原样留着");
     assert.equal(json.root, join(realpathSync(ws), ".pi", "feishu"));
-    assert.match(stderr, /不属于本工作区，未自动搬迁/);
+    assert.match(stderr, /不属于本工作区/);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -276,6 +284,43 @@ test("搬迁后旧全局目录不存在时不会误报（没有 legacy 目录的
     const { json, stderr } = probe(CONFIG_PROBE, ws, { ...process.env, HOME: home, DSH_HOME: join(home, "dsh") });
     assert.equal(json.root, join(realpathSync(ws), ".pi", "feishu"));
     assert.ok(!/旧全局实例目录/.test(stderr), `不该有迁移提示：${stderr}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("迁移：在子目录（如 .pi/ax-feishu-bridge）里启动不会搬走父工作区的数据", () => {
+  // 严格相等：只有「就是属主目录本身」才搬。子目录里跑一次程序就搬走整份实例数据，代价太大。
+  const home = mkdtempSync(join(tmpdir(), "feishu-home-"));
+  const ws = join(home, "ws");
+  const sub = join(ws, ".pi", "some-tool");
+  const legacy = join(home, ".pi", "agent", "feishu");
+  mkdirSync(legacy, { recursive: true });
+  mkdirSync(sub, { recursive: true });
+  writeFileSync(join(legacy, "config.pi.json"), '{"appId":"cli_x"}\n', "utf8");
+  writeFileSync(join(legacy, "owner-workspace.json"), JSON.stringify({ cwd: realpathSync(ws) }), "utf8");
+  try {
+    const { json, stderr } = probe(CONFIG_PROBE, sub, { ...process.env, HOME: home, DSH_HOME: join(home, "dsh") });
+    assert.ok(existsSync(join(legacy, "config.pi.json")), "父工作区的数据必须原样留着");
+    assert.ok(!existsSync(join(realpathSync(sub), ".pi", "feishu", "config.pi.json")), "子目录里不该出现搬过来的数据");
+    assert.equal(json.root, join(realpathSync(sub), ".pi", "feishu"));
+    assert.match(stderr, /不属于本工作区/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("迁移：测试进程里绝不搬真实数据（就算属主就是本目录）", () => {
+  const home = mkdtempSync(join(tmpdir(), "feishu-home-"));
+  const ws = join(home, "ws");
+  const legacy = join(home, ".pi", "agent", "feishu");
+  mkdirSync(legacy, { recursive: true });
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(legacy, "config.pi.json"), '{"appId":"cli_x"}\n', "utf8");
+  writeFileSync(join(legacy, "owner-workspace.json"), JSON.stringify({ cwd: realpathSync(ws) }), "utf8");
+  try {
+    probe(CONFIG_PROBE, ws, { ...process.env, HOME: home, DSH_HOME: join(home, "dsh"), ALLOW_NODE_TEST_CONTEXT: "1" });
+    assert.ok(existsSync(join(legacy, "config.pi.json")), "测试进程不得移动真实实例数据");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

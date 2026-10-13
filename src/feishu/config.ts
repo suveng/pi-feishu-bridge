@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync, 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseGroupKeywords } from "./group-trigger.ts";
-import { instanceWebhookPort, LEGACY_GLOBAL_ROOT_DIR, OWNER_WORKSPACE_FILE, readOwnerWorkspaceAt, resolveHarnessRoot, resolveRootDir, sameWorkspace } from "./instance.ts";
+import { instanceWebhookPort, LEGACY_GLOBAL_ROOT_DIR, normalizeDir, OWNER_WORKSPACE_FILE, readOwnerWorkspaceAt, resolveHarnessRoot, resolveRootDir } from "./instance.ts";
 import { applyRuntimeOverrides, getRuntimeOverrides, setRuntimeOverridesPath } from "./runtime-config.ts";
 import type { CardActionMode, Domain, FeishuConfig, GroupPolicy, LearnApprovalConfig } from "./types.ts";
 
@@ -190,13 +190,19 @@ export function ensureRoot() {
  * 3. 旧全局目录里的属主工作区记录就是本工作区。
  *
  * 用 rename（同盘瞬间完成），失败只打印提示、不做任何删除。
+ *
+ * 属主判定用**严格相等**（不是 sameWorkspace 的「子目录也算同一工作区」）：
+ * 迁移是真移动，宁可漏搬也不能错搬 —— 在子目录（例如 `.pi/ax-feishu-bridge`）里
+ * 跑一次程序就把父工作区的实例数据搬进子目录，是很贵的错误。
  */
 function migrateLegacyGlobalInstance() {
   if (existsSync(ROOT_DIR) || !existsSync(LEGACY_GLOBAL_ROOT_DIR)) return;
+  // 测试进程绝不搬真实数据（测试里到处都会 ensureRoot()，而 cwd/HOME 都不是真实工作区）
+  if (isTestProcess()) return;
   const owner = readOwnerWorkspaceAt(join(LEGACY_GLOBAL_ROOT_DIR, OWNER_WORKSPACE_FILE));
-  if (!owner || !sameWorkspace(owner, process.cwd())) {
+  if (!owner || normalizeDir(owner) !== normalizeDir(process.cwd())) {
     console.error(
-      `[feishu] 检测到旧全局实例目录 ${LEGACY_GLOBAL_ROOT_DIR}（属主：${owner ?? "未知"}），不属于本工作区，未自动搬迁。`,
+      `[feishu] 检测到旧全局实例目录 ${LEGACY_GLOBAL_ROOT_DIR}（属主：${owner ?? "未知"}），不属于本工作区（当前 ${process.cwd()}），未自动搬迁。`,
     );
     return;
   }
@@ -209,6 +215,11 @@ function migrateLegacyGlobalInstance() {
       `[feishu] 搬迁旧全局实例数据失败（未做任何删除）：${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+/** 是否跑在测试进程里（`node --test` 会设 NODE_TEST_CONTEXT）；测试不得移动真实实例数据。 */
+function isTestProcess(): boolean {
+  return Boolean(process.env.NODE_TEST_CONTEXT) || process.argv.includes("--test");
 }
 
 /**
