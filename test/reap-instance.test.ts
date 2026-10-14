@@ -57,6 +57,15 @@ const LAUNCH = (ext) => [
 
 const fakeDaemon = (ext) => spawn("bash", ["-lc", LAUNCH(ext)], { stdio: "ignore" });
 
+/**
+ * 生产里 launcher -> 启动壳 -> (tail, pi) 可能不止一层（Popen、重启脚本、终端各自一层）。
+ * 这里给「有主」的那个再套一层 launcher，且 launcher 的命令行里也带着同一串启动文本
+ * （同样会被根判据命中）：只保「直接父进程」的旧实现会把这一层 SIGTERM 掉，
+ * tail 随即变孤儿，管道写端一关 -> pi 的 stdin EOF -> 桥接掉线。
+ * 末尾的 "; :" 是为了不让 bash 把唯一一条命令 exec 优化掉，保住两层结构。
+ */
+const spawnNested = (ext) => spawn("bash", ["-c", "bash -lc " + JSON.stringify(LAUNCH(ext)) + " ; :"], { stdio: "ignore" });
+
 function listProcesses() {
   const out = spawnSync("ps", ["-wwaxo", "pid=,ppid=,command="], { encoding: "utf8" }).stdout;
   return out
@@ -78,6 +87,15 @@ function shapeOf(wrapperPid) {
 
 const report = (s) => ({ wrapper: alive(s.wrapper), tail: alive(s.tail), real: alive(s.real) });
 
+/** 复现生产判据：命令行（去引号）里同时出现三个 flag 且 -e 与本实例入口紧邻。 */
+function looksLikeRoot(pid, ext) {
+  const proc = listProcesses().find((p) => p.pid === pid);
+  if (!proc) return false;
+  const normalized = proc.command.replace(/'/g, "");
+  return normalized.includes("--mode rpc") && normalized.includes("--no-extensions")
+    && normalized.includes("--no-builtin-tools") && normalized.includes("-e " + ext);
+}
+
 /** 等启动壳把两个孩子（tail + 真身）都拉起来：strip-types 下固定 600ms 等待不够稳，会漏认。 */
 async function waitForShape(wrapperPid, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
@@ -94,12 +112,24 @@ const cleanup = (s) => {
   }
 };
 
+/** 等 launcher 把启动壳 fork 出来（拿它的 pid 才能继续认 tail / 真身）。 */
+async function waitForChild(parentPid, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  let child = listProcesses().find((proc) => proc.ppid === parentPid)?.pid;
+  while (!child && Date.now() < deadline) {
+    await sleep(100);
+    child = listProcesses().find((proc) => proc.ppid === parentPid)?.pid;
+  }
+  return child;
+}
+
 (async () => {
-  const ownedWrapper = fakeDaemon(OWN_EXT);
+  const ownedLauncher = spawnNested(OWN_EXT);
+  const ownedWrapperPid = await waitForChild(ownedLauncher.pid);
   const orphanWrapper = fakeDaemon(OWN_EXT);
   const foreignWrapper = fakeDaemon(FOREIGN_EXT);
 
-  const owned = await waitForShape(ownedWrapper.pid);
+  const owned = await waitForShape(ownedWrapperPid);
   const orphan = await waitForShape(orphanWrapper.pid);
   const foreign = await waitForShape(foreignWrapper.pid);
 
@@ -120,12 +150,15 @@ const cleanup = (s) => {
     "some-other-plugin.lock": { pid: process.pid },
   }, null, 2));
 
+  // 【前提】必须在 reap 之前算：被回收掉的进程在 ps 里就查不到了，
+  // 断言会变成「launcherIsRoot=false」，把「前提不成立」和「真被误杀」两件事混在一起。
+  const launcherIsRootBefore = looksLikeRoot(ownedLauncher.pid, OWN_EXT);
   reapDetachedDaemonProcesses({ extensionPath: OWN_EXT });
   await sleep(500);
 
   console.log(JSON.stringify({
     locksPath,
-    owned: { ...owned, ...report(owned) },
+    owned: { launcher: alive(ownedLauncher.pid), launcherPid: ownedLauncher.pid, launcherIsRoot: launcherIsRootBefore, ...owned, ...report(owned) },
     orphan: { ...orphan, ...report(orphan) },
     foreign: { ...foreign, ...report(foreign) },
   }));
@@ -133,6 +166,7 @@ const cleanup = (s) => {
   cleanup(owned);
   cleanup(orphan);
   cleanup(foreign);
+  try { process.kill(ownedLauncher.pid, "SIGKILL"); } catch {}
   process.exit(0);
 })();
 `;
@@ -163,6 +197,10 @@ test("多开：被网关锁认领的 daemon（含启动壳与 tail）不被回�
     assert.equal(out.owned.real, true, "被网关锁认领的 daemon 真身（另一个实例）不该被杀");
     assert.equal(out.owned.tail, true, "它的 tail 不该被杀（否则那个 daemon 的 stdin 会 EOF）");
     assert.equal(out.owned.wrapper, true, "它的启动壳不该被回收");
+    // 回归：启动链可能不止一层 —— launcher 的命令行里也带着同一串启动文本，
+    // 只保「直接父进程」时它会被回收，tail 变孤儿后 daemon 的 stdin 就 EOF 了（实际发生过）。
+    assert.ok(out.owned.launcherIsRoot, "用例前提：launcher 的命令行本身也会被判据命中（否则这条断言无效）");
+    assert.equal(out.owned.launcher, true, "启动链上层的 launcher 不该被回收");
 
     assert.equal(out.orphan.wrapper, false, "无主残留空壳（启动壳）应被回收");
     assert.equal(out.orphan.real, false, "无主残留空壳的真身应被回收");

@@ -650,14 +650,32 @@ export function reapDetachedDaemonProcesses(options: { keepPids?: number[]; exte
   const keep = new Set([...(options.keepPids || []), ...readAllGatewayOwnerPids()]);
   const allProcesses = listProcesses();
 
-  // daemon 的启动壳（`bash -lc 'tail -f /dev/null | exec pi ...'`）与喂 stdin 的 tail 都不持锁，
-  // 只锁住 pi 真身不够：壳被回收会连带 tail（管道写端关闭 → pi 的 stdin 直接 EOF）。
-  // 所以把每个被锁认领的 pid 的**直接父进程**一并保留 —— 壳进了 keep，它的后代就不再被遍历。
-  const parentOf = new Map(allProcesses.map((proc) => [proc.pid, proc.ppid]));
-  for (const pid of [...keep]) {
-    const parent = parentOf.get(pid);
-    if (parent && parent > 1) keep.add(parent);
+  const byParent = new Map<number, DaemonProcessInfo[]>();
+  for (const proc of allProcesses) {
+    const children = byParent.get(proc.ppid) || [];
+    children.push(proc);
+    byParent.set(proc.ppid, children);
   }
+
+  // 启动链与喂 stdin 的 tail 都不持锁，只锁住 pi 真身不够：
+  // 壳（`bash -lc 'tail -f /dev/null | exec pi ...'`，外面还可能再套一层）被回收，
+  // tail 就变孤儿，管道写端一关 → pi 的 stdin 直接 EOF → 那个工作区的桥接就掉线。
+  // 所以每个被锁认领的 pid 要保**两条线**：
+  //   ① 整条祖先链（外层 launcher 也可能命中根判据，得一起保，2026-10-14 二次事故的成因）；
+  //   ② 它自己的整棵子树（多层中间壳、工具子进程）。
+  // 注意②只对**持锁真身**展开，不能对整条祖先链展开：
+  // 祖先里包含本次扫描者自己，对它展开会把「扫描者的兄弟进程」也一起保下来，
+  // 无主残留空壳就再也回收不掉了（测试用例 `orphan.wrapper === false` 抓的就是这个）。
+  const holders = [...keep];
+  const parentOf = new Map(allProcesses.map((proc) => [proc.pid, proc.ppid]));
+  for (const pid of holders) {
+    let parent = parentOf.get(pid);
+    for (let hops = 0; parent && parent > 1 && hops < 32; hops += 1) {
+      keep.add(parent);
+      parent = parentOf.get(parent);
+    }
+  }
+  for (const pid of holders) collectSubtreePids(pid, byParent, keep);
 
   const roots = allProcesses.filter((proc) => looksLikeFeishuDaemon(proc.command, options.extensionPath));
   if (!roots.length) return;
@@ -668,13 +686,6 @@ export function reapDetachedDaemonProcesses(options: { keepPids?: number[]; exte
       pids: keptRoots.map((proc) => proc.pid),
       candidates: roots.length,
     });
-  }
-
-  const byParent = new Map<number, DaemonProcessInfo[]>();
-  for (const proc of allProcesses) {
-    const children = byParent.get(proc.ppid) || [];
-    children.push(proc);
-    byParent.set(proc.ppid, children);
   }
 
   const toKill = new Set<number>();
@@ -698,6 +709,21 @@ function collectDescendantPids(pid: number, byParent: Map<number, DaemonProcessI
     if (keep.has(child.pid)) continue;
     toKill.add(child.pid);
     collectDescendantPids(child.pid, byParent, toKill, keep);
+  }
+}
+
+/** 把一个 pid 的整棵子树并进 `out`（含多层中间壳）：用于「活着的 daemon 全家都不许动」。 */
+function collectSubtreePids(rootPid: number, byParent: Map<number, DaemonProcessInfo[]>, out: Set<number>) {
+  const stack = [rootPid];
+  const seen = new Set<number>([rootPid]);
+  while (stack.length) {
+    const pid = stack.pop() as number;
+    for (const child of byParent.get(pid) || []) {
+      if (seen.has(child.pid)) continue;
+      seen.add(child.pid);
+      out.add(child.pid);
+      stack.push(child.pid);
+    }
   }
 }
 
