@@ -337,7 +337,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
         return { status: "busy" as const, owner };
       }
 
-      reapDetachedDaemonProcesses({ keepPids: [process.pid] });
+      reapDetachedDaemonProcesses({ keepPids: [process.pid], extensionPath: extensionEntry });
       ensureRoot();
       const logFd = openSync(DAEMON_LOG_PATH, "a");
       let child: ChildProcess;
@@ -378,18 +378,18 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   async function stopDaemon() {
     const owner = currentGatewayOwner();
     if (!owner) {
-      reapDetachedDaemonProcesses();
+      reapDetachedDaemonProcesses({ extensionPath: extensionEntry });
       return { status: "none" as const };
     }
     if (owner.pid === process.pid) {
       await stop();
-      reapDetachedDaemonProcesses({ keepPids: [process.pid] });
+      reapDetachedDaemonProcesses({ keepPids: [process.pid], extensionPath: extensionEntry });
       return { status: "stopped-current" as const };
     }
     try {
       process.kill(owner.pid, "SIGTERM");
       await sleep(800);
-      reapDetachedDaemonProcesses();
+      reapDetachedDaemonProcesses({ extensionPath: extensionEntry });
       return { status: "stopped" as const, owner };
     } catch (error) {
       return { status: "error" as const, owner, error };
@@ -633,10 +633,20 @@ type DaemonProcessInfo = {
 export function reapDetachedDaemonProcesses(options: { keepPids?: number[]; extensionPath?: string } = {}) {
   if (process.platform === "win32") return;
 
-  // 多开（同机多个工作区）：命令行里只有共用的 `feishu/index.ts`，分不出实例归属，
-  // 所以「有主」一律以网关锁为准 —— 被任何一把锁认领的 pid（及其后代）都保留，
-  // 只回收没人认领的残留空壳（bash + tail）。否则在任一工作区敲 /feishu restart，
-  // 会把另一个工作区的 daemon 一起 SIGTERM。见 gateway-lock.readAllGatewayOwnerPids。
+  // 【必须带入口路径】没有明确的扩展入口就**不扫**（fail-safe）：
+  // 2026-10-14 事故 —— 旧实现不传入口时回退到广谱匹配 `feishu/index.ts`，
+  // 插件自己的 `npm test`（test/reap-instance.test.ts 在隔离 HOME 里跑 reap，
+  // 真实 daemon 不在那把临时锁里）一次把两个工作区的 daemon 全 SIGTERM 掉，
+  // 表现为「重启 pi 刚连上就断、只剩一个能用」。
+  // 现在扫描只作用于**本实例扩展入口**拉起的 daemon：跨工作区的 daemon 即便无锁也不会被误杀。
+  if (!options.extensionPath) {
+    debugLog("feishu.reap.skipped_missing_extension_path", {});
+    return;
+  }
+
+  // 多开（同机多个工作区）：同一条扩展入口可能被多个工作区共用（全局安装），
+  // 所以「本实例入口匹配到的」还要再用网关锁判一次「有主」—— 被任何一把锁认领的
+  // pid（及其后代）都保留，只回收没人认领的残留空壳（bash + tail）。见 gateway-lock.readAllGatewayOwnerPids。
   const keep = new Set([...(options.keepPids || []), ...readAllGatewayOwnerPids()]);
   const allProcesses = listProcesses();
 
@@ -669,6 +679,9 @@ export function reapDetachedDaemonProcesses(options: { keepPids?: number[]; exte
 
   const toKill = new Set<number>();
   for (const proc of roots) {
+    // 自己这条不算：本进程命令行里也会出现这些字串，把自己当成根会把**自己名下的子进程**
+    // 当残留回收（工具子进程、别的 agent 都会被误杀）。
+    if (proc.pid === process.pid) continue;
     if (keep.has(proc.pid)) continue;
     toKill.add(proc.pid);
     collectDescendantPids(proc.pid, byParent, toKill, keep);
@@ -707,7 +720,7 @@ function listProcesses() {
   return processes;
 }
 
-function looksLikeFeishuDaemon(command: string, extensionPath?: string) {
+function looksLikeFeishuDaemon(command: string, extensionPath: string) {
   // 启动命令经 quoteShell 处理，每个参数单独加引号（'--mode' 'rpc' '--no-extensions'），
   // 直接匹配 "--mode rpc" 永远失败 —— 那样残留的 daemon 空壳（bash + tail 喂 stdin）
   // 永远不会被 reap 掉。所以先去引号再匹配。
@@ -716,8 +729,10 @@ function looksLikeFeishuDaemon(command: string, extensionPath?: string) {
     && normalized.includes("--no-extensions")
     && normalized.includes("--no-builtin-tools");
   if (!hasDaemonFlags) return false;
-  if (extensionPath) return normalized.includes(extensionPath);
-  return normalized.includes("feishu/index.ts");
+  if (!extensionPath) return false;
+  // 入口路径必须**紧跟在 `-e` 后面**（daemon 的启动形状），而不是「命令行里提到过这个路径」：
+  // 否则一段只是引用了启动命令的脚本 / heredoc（测试探针、重启脚本）也会被当成 daemon 回收。
+  return normalized.includes(`-e ${extensionPath}`);
 }
 
 function terminateLauncherParent() {
