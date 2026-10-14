@@ -16,6 +16,7 @@ import { ProgressTracker, progressNeedsElement } from "./progress-note.ts";
 import { resolveStreamOptions, type ReplyCardStreamOptions } from "./reply-card-options.ts";
 import { loadConfig } from "./config.ts";
 import { debugLog } from "./debug.ts";
+import { registerLiveCard, unregisterLiveCard } from "./live-cards.ts";
 
 export type { ReplyCardStatus, ReplyCardFinalStatus } from "./card-builder.ts";
 export {
@@ -192,6 +193,9 @@ export class ReplyCard implements ReplyCardSink {
       });
       // 先让飞书看到「回复中」，不等待 Pi 产出第一段正文；失败仍会在结束时回落为普通回复卡。
       void this.cardkit.startImmediately();
+      // 登记在册：进程被 kill（重启）时由退出收尾统一翻成「已停止」，
+      // 否则这张卡会永久停在「正在回复…」
+      registerLiveCard(this);
       return;
     }
 
@@ -211,6 +215,7 @@ export class ReplyCard implements ReplyCardSink {
       runId: this.runId,
       cardMessageId: this.segmentMessageId,
     });
+    registerLiveCard(this);
   }
 
   /** 按 target 决定平铺（create）还是回复（reply） */
@@ -402,6 +407,8 @@ export class ReplyCard implements ReplyCardSink {
   ) {
     // paused 也要允许收尾：否则「等你选择」的卡永远停在中间态
     if (this.status !== "running" && this.status !== "paused") return;
+    // 已到终态：退出收尾不该再动它（用户可能已经看到完整的最终卡）
+    unregisterLiveCard(this);
     const wasPaused = this.status === "paused";
     this.status = status;
     this.note = note ?? defaultFinalNote(status);

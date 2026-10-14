@@ -26,6 +26,7 @@ import type { FeishuConfig, FeishuStatus } from "../../feishu/types.ts";
 import { createCardActionHandler } from "../../feishu/card-actions.ts";
 import { LearnApprovalClient } from "../../feishu/learn-approval.ts";
 import { resolveCardTarget } from "../../feishu/reply-card.ts";
+import { installExitFlush } from "../../feishu/live-cards.ts";
 import { PiConversationRuntime, handlePiMessageEnd } from "./PiConversationRuntime.ts";
 
 /**
@@ -42,6 +43,10 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   if (process.env[CHILD_SESSION_ENV] === "1") {
     return;
   }
+
+  // 进程被 kill（重启桥接）时，把在册的「回复中」卡片翻成「已停止」并写明原因。
+  // 少了这一步，飞书侧会永久停在「正在回复…」（2026-10-14 事故）。
+  installExitFlush();
 
   // 模型可读写白名单配置（热更新 + 落盘）
   registerFeishuConfigTools(pi);
