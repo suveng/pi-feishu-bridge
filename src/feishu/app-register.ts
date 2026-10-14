@@ -1,6 +1,6 @@
 /**
- * 扫码注册飞书/Lark 机器人应用（平台无关，Pi 与 Harness 共用）。
- * 二维码打印到终端；提示信息通过 onNotify 回调交给调用方（Pi 用 TUI 通知，Harness 用终端输出）。
+ * 扫码注册飞书/Lark 机器人应用。
+ * 二维码打印到终端；提示信息通过 onNotify 回调交给调用方（Pi 用 TUI 通知）。
  */
 import qrcode from "qrcode-terminal";
 import type { Domain } from "./types.ts";

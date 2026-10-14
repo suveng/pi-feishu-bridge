@@ -1,8 +1,8 @@
 /**
  * Agent Runtime 解耦层：
  * 飞书公共代码只依赖本文件的 ConversationRuntime 接口与公共类型，
- * 不直接依赖任何具体的 Agent Runtime（Pi / DeepSeek Harness）。
- * 各 Runtime 的具体实现位于 src/adapters/ 下。
+ * 只服务 Pi 一个 Agent Runtime（本仓不做多 Agent 适配）。
+ * Pi 的具体实现位于 src/adapters/pi/ 下。
  */
 import type { FeishuImageInput } from "./attachments.ts";
 import type { ResumeScope, ResumeSessionPage } from "./cards.ts";
@@ -90,7 +90,7 @@ export interface ConversationRuntime {
 
   /**
    * 切换到历史会话。sessionRef 是不透明引用（来自 listResumeSessions 的 item.path），
-   * 具体含义（Pi 会话文件路径 / Harness SessionId）由实现解释。
+   * 具体含义（Pi 会话文件路径）由实现解释。
    */
   resumeConversation(key: string, sessionRef: string, onReply: (text: string) => Promise<void>): Promise<void>;
 

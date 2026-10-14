@@ -27,7 +27,7 @@ export const WORKSPACE_INSTANCE_SUBPATH = join(".pi", "feishu");
 /** 0.6.0 之前的全局实例目录，仅为「搬迁旧数据 / 打提示」保留。 */
 export const LEGACY_GLOBAL_ROOT_DIR = join(homedir(), ".pi", "agent", "feishu");
 
-/** 卡片回调端口区间：3001/3002 是历史上 Pi / DSH 的固定端口，实例一律从 3003 起派生。 */
+/** 卡片回调端口区间：3001 是历史上 Pi 的固定端口，实例一律从 3003 起派生。 */
 const INSTANCE_PORT_BASE = 3003;
 const INSTANCE_PORT_SPAN = 97;
 
@@ -64,17 +64,9 @@ export function resolveRootDir(env: NodeJS.ProcessEnv = process.env, cwd: string
 }
 
 /**
- * Harness（DSH）数据根目录：与 Pi 同住一份实例目录下的 `harness/`，
- * 这样同一工作区里两个 runtime 的文件一起跟着工作区走。
- */
-export function resolveHarnessRoot(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): string {
-  return join(resolveInstanceDir(env, cwd), "harness");
-}
-
-/**
  * 卡片回调默认端口：按「实例目录 + base」稳定派生到 3003-3099。
  * 同一工作区每次启动得到同一个端口（飞书后台的回调地址只需配一次），
- * 不同工作区互不相同；base 只是把 Pi(3001) / DSH(3002) 两份默认值岔开。
+ * 不同工作区互不相同；base 只影响派生结果（Pi 传 3001）。
  * 派生在区间内存在理论碰撞，需要精确控制时用 `FEISHU_CARD_ACTION_WEBHOOK_PORT`
  * 显式指定（显式值优先级更高）。
  */

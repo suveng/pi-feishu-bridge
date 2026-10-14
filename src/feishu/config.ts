@@ -1,8 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync, renameSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseGroupKeywords } from "./group-trigger.ts";
-import { instanceWebhookPort, LEGACY_GLOBAL_ROOT_DIR, normalizeDir, OWNER_WORKSPACE_FILE, readOwnerWorkspaceAt, resolveHarnessRoot, resolveRootDir } from "./instance.ts";
+import { instanceWebhookPort, LEGACY_GLOBAL_ROOT_DIR, normalizeDir, OWNER_WORKSPACE_FILE, readOwnerWorkspaceAt, resolveRootDir } from "./instance.ts";
 import { applyRuntimeOverrides, getRuntimeOverrides, setRuntimeOverridesPath } from "./runtime-config.ts";
 import type { CardActionMode, Domain, FeishuConfig, GroupPolicy, LearnApprovalConfig } from "./types.ts";
 
@@ -12,29 +11,13 @@ import type { CardActionMode, Domain, FeishuConfig, GroupPolicy, LearnApprovalCo
  */
 export const ROOT_DIR = resolveRootDir();
 
-/** dsh 的家目录：优先 DSH_HOME 环境变量，否则 ~/.dsh */
-export function dshHome(): string {
-  const fromEnv = process.env.DSH_HOME?.trim();
-  return fromEnv || join(homedir(), ".dsh");
-}
-
-/** Harness 数据目录：与 Pi 同住实例目录下的 `harness/`，一起跟着工作区走 */
-export const HARNESS_ROOT = resolveHarnessRoot();
-
-// ---------- Pi 适配器专用路径 ----------
+// ---------- Pi 适配器路径 ----------
 export const CONFIG_PI_PATH = join(ROOT_DIR, "config.pi.json");
 export const STATE_PI_PATH = join(ROOT_DIR, "state.pi.json");
 export const BRIDGE_PI_PATH = join(ROOT_DIR, "bridge.pi.json");
 export const DEDUPE_PI_PATH = join(ROOT_DIR, "dedupe.pi.json");
 export const DEBUG_PI_LOG_PATH = join(ROOT_DIR, "debug.pi.log");
 export const DAEMON_LOG_PATH = join(ROOT_DIR, "daemon.log");
-
-// ---------- Harness 适配器专用路径 ----------
-export const CONFIG_HARNESS_PATH = join(HARNESS_ROOT, "config.harness.json");
-export const STATE_HARNESS_PATH = join(HARNESS_ROOT, "state.harness.json");
-export const BRIDGE_HARNESS_PATH = join(HARNESS_ROOT, "bridge.harness.json");
-export const DEDUPE_HARNESS_PATH = join(HARNESS_ROOT, "dedupe.harness.json");
-export const DEBUG_HARNESS_LOG_PATH = join(HARNESS_ROOT, "debug.harness.log");
 
 // ---------- 兼容旧引用（等价于 Pi 版） ----------
 export const CONFIG_PATH = CONFIG_PI_PATH;
@@ -46,13 +29,13 @@ export const DEBUG_LOG_PATH = DEBUG_PI_LOG_PATH;
 export const CHILD_SESSION_ENV = "PI_FEISHU_CHILD_SESSION";
 
 /**
- * 每个 Agent Runtime 的配置/状态/记录文件集合。
- * 同一进程内只会激活一个 runtime（Pi 或 Harness），
- * 公共代码通过 loadConfig/debugLog 等自动使用当前 runtime 的文件。
+ * Agent Runtime 的配置/状态/记录文件集合。
+ * 本仓只有 Pi 一个 runtime，这层间接只是让公共代码通过 loadConfig/debugLog
+ * 取文件时不必散落常量。
  */
 export type RuntimeSource = {
-  id: "pi" | "harness";
-  /** 环境变量前缀：Pi 用 FEISHU_，Harness 用 HARNESS_ */
+  id: "pi";
+  /** 环境变量前缀：FEISHU_ */
   envPrefix: string;
   configPath: string;
   statePath: string;
@@ -71,30 +54,20 @@ export const PI_SOURCE: RuntimeSource = {
   debugLogPath: DEBUG_PI_LOG_PATH,
 };
 
-export const HARNESS_SOURCE: RuntimeSource = {
-  id: "harness",
-  envPrefix: "HARNESS",
-  configPath: CONFIG_HARNESS_PATH,
-  statePath: STATE_HARNESS_PATH,
-  bridgePath: BRIDGE_HARNESS_PATH,
-  dedupePath: DEDUPE_HARNESS_PATH,
-  debugLogPath: DEBUG_HARNESS_LOG_PATH,
-};
-
 /** 默认 Pi（向后兼容：Pi 进程无需显式设置）。 */
 let currentSource: RuntimeSource = PI_SOURCE;
 
 export function setRuntimeSource(source: RuntimeSource) {
   currentSource = source;
-  // 运行时热更新配置跟随各自平台：Pi 住 ~/.pi，Harness 住 dsh 家目录
-  setRuntimeOverridesPath(source.id === "harness" ? join(HARNESS_ROOT, "runtime-overrides.json") : join(ROOT_DIR, "runtime-overrides.json"));
+  // 运行时热更新配置落在实例目录里
+  setRuntimeOverridesPath(join(ROOT_DIR, "runtime-overrides.json"));
 }
 
 export function getRuntimeSource(): RuntimeSource {
   return currentSource;
 }
 
-/** 按当前 runtime 的环境变量前缀读取（如 STREAM_PRINT_FREQUENCY_MS → FEISHU_/HARNESS_ 前缀）。 */
+/** 按当前 runtime 的环境变量前缀读取（如 STREAM_PRINT_FREQUENCY_MS → FEISHU_STREAM_PRINT_FREQUENCY_MS）。 */
 export function runtimeEnv(name: string): string | undefined {
   return process.env[`${currentSource.envPrefix}_${name}`];
 }
@@ -136,7 +109,7 @@ export const DEFAULT_CONFIG: Pick<
   ignoreBotMessages: true,
   cardActionMode: "webhook",
   cardActionWebhookHost: "0.0.0.0",
-  // Pi 默认端口；DSH 的默认端口见 defaultCardActionWebhookPort()
+  // 默认端口，实际值由 defaultCardActionWebhookPort() 按实例目录派生
   cardActionWebhookPort: 3001,
   cardActionWebhookPath: "/webhook/card",
   language: "zh",
@@ -163,20 +136,16 @@ export const DEFAULT_CONFIG: Pick<
 };
 
 /**
- * 卡片回调端口：Pi 与 DSH 用不同的 base（3001 / 3002）岔开，
- * 再按实例目录稳定派生到 3003-3099，避免同一台机器上多个工作区（或两个 runtime）
- * 在同一个端口上互抢；显式 `FEISHU_CARD_ACTION_WEBHOOK_PORT` 优先。
+ * 卡片回调端口：按实例目录稳定派生到 3003-3099，
+ * 避免同一台机器上多个工作区在同一个端口上互抢；
+ * 显式 `FEISHU_CARD_ACTION_WEBHOOK_PORT` 优先。
  */
 export function defaultCardActionWebhookPort(): number {
-  return instanceWebhookPort(getRuntimeSource().id === "harness" ? 3002 : 3001);
+  return instanceWebhookPort(3001);
 }
 
 export function ensureRoot() {
   migrateLegacyGlobalInstance();
-  if (getRuntimeSource().id === "harness") {
-    mkdirSync(HARNESS_ROOT, { recursive: true });
-    return;
-  }
   mkdirSync(ROOT_DIR, { recursive: true });
   migrateLegacyFiles();
 }
@@ -224,7 +193,7 @@ function isTestProcess(): boolean {
 
 /**
  * 旧版本所有文件不带 runtime 后缀；首次运行新版本时把旧文件改名为 Pi 版，
- * 避免丢失已有配置/会话绑定（Harness 是新家，无需迁移）。
+ * 避免丢失已有配置/会话绑定。
  */
 function migrateLegacyFiles() {
   migrateFile("state.json", STATE_PI_PATH);

@@ -14,7 +14,6 @@
  * - 客户端有缓存（注册约 5 分钟 + 客户端缓存约 3 分钟），失败后无需反复重试。
  */
 import { debugLog } from "./debug.ts";
-import { getRuntimeSource } from "./config.ts";
 import type { FeishuConfig } from "./types.ts";
 
 /** 单条指令定义：command 不含前导斜杠 */
@@ -25,12 +24,6 @@ export type SlashCommandSpec = {
   zh: string;
   /** 英文描述（i18n.en_us） */
   en: string;
-  /**
-   * 该指令只在哪个 Runtime 下存在。
-   * 不填 = 桥接自身实现，两个 Runtime 都有；
-   * "pi" = 由 Pi 侧扩展注册（如 knowledge-flow 的 /req /kb /test），Harness 侧不存在，不能注册。
-   */
-  runtime?: "pi" | "harness";
 };
 
 /**
@@ -47,19 +40,19 @@ export const FEISHU_SLASH_COMMANDS: SlashCommandSpec[] = [
   { command: "stop", zh: "停止当前生成", en: "Stop the current reply" },
   { command: "config", zh: "查看或修改运行时配置（仅私聊）", en: "View or update runtime config (private chat only)" },
   { command: "commands", zh: "显示全部命令", en: "List all commands" },
-  // interrupt 模式目前只在 Pi 侧实现（dsh harness 忽略该设置），所以标 runtime: "pi"
-  { command: "delivery", zh: "设置「正在生成时又收到新消息」怎么处理（排队 / 立即打断，仅私聊）", en: "How to handle new messages while replying (queue / interrupt, DM only)", runtime: "pi" },
-  // --- 由 Pi 侧扩展（knowledge-flow）注册的命令，Harness 下不存在 ---
+  // interrupt 模式为 Pi 侧实现
+  { command: "delivery", zh: "设置「正在生成时又收到新消息」怎么处理（排队 / 立即打断，仅私聊）", en: "How to handle new messages while replying (queue / interrupt, DM only)" },
+  // --- 由 Pi 侧扩展（knowledge-flow）注册的命令 ---
   // 面板的作用是「提示用户有哪些命令可用」：飞书斜杠指令点击后只是把命令文本
   // 插进输入框（不会自动执行），用户补完参数再发送。所以这里保留全部命令，
   // 与实际是否派发无关（派发策略见 PiConversationRuntime 的 DISPATCHED_SLASH_COMMANDS）。
   // 注意：command 必须匹配 ^[a-z][a-z0-9_-]{0,31}$（实测 code 40000000），
   // 所以 Pi 侧的中文命令名（如原先的 /学习）无法注册，统一改用英文名 /learn。
-  { command: "req", zh: "需求流程：/req [新 <名称>|开发|测试|bug|归档|状态] [需求ID]", en: "Requirement flow: /req [new|dev|test|bug|archive|status]", runtime: "pi" },
-  { command: "kb", zh: "知识库：/kb [查|梳理|新模块|新功能|同步|巡检]", en: "Knowledge base: /kb [find|outline|new-module|new-feature|sync|audit]", runtime: "pi" },
-  { command: "test", zh: "测试域：/test [新用例|缺口|同步|查|状态]", en: "Test domain: /test [new-case|gaps|sync|find|status]", runtime: "pi" },
-  { command: "learn", zh: "学习：把反馈落成 .pi/ 下的规范改动（无参数则复盘本会话）", en: "Learn: turn feedback into .pi spec changes (no args = review this session)", runtime: "pi" },
-  { command: "deploy-test", zh: "测试环境部署：/deploy-test [端名]，端名如 rust_server / quasar / quasar_h5", en: "Deploy test env: /deploy-test [target]", runtime: "pi" },
+  { command: "req", zh: "需求流程：/req [新 <名称>|开发|测试|bug|归档|状态] [需求ID]", en: "Requirement flow: /req [new|dev|test|bug|archive|status]" },
+  { command: "kb", zh: "知识库：/kb [查|梳理|新模块|新功能|同步|巡检]", en: "Knowledge base: /kb [find|outline|new-module|new-feature|sync|audit]" },
+  { command: "test", zh: "测试域：/test [新用例|缺口|同步|查|状态]", en: "Test domain: /test [new-case|gaps|sync|find|status]" },
+  { command: "learn", zh: "学习：把反馈落成 .pi/ 下的规范改动（无参数则复盘本会话）", en: "Learn: turn feedback into .pi spec changes (no args = review this session)" },
+  { command: "deploy-test", zh: "测试环境部署：/deploy-test [端名]，端名如 rust_server / quasar / quasar_h5", en: "Deploy test env: /deploy-test [target]" },
 ];
 
 const API_PATH = "/open-apis/application/v7/app_slash_commands";
@@ -157,9 +150,7 @@ export async function syncSlashCommands(
   config: FeishuConfig,
   options?: { commands?: SlashCommandSpec[] },
 ): Promise<SyncSlashCommandsResult> {
-  const specs = (options?.commands || FEISHU_SLASH_COMMANDS).filter(
-    (spec) => !spec.runtime || spec.runtime === getRuntimeSource().id,
-  );
+  const specs = options?.commands || FEISHU_SLASH_COMMANDS;
   const language: "zh" | "en" = config?.language === "en" ? "en" : "zh";
   const result: SyncSlashCommandsResult = { ok: false, created: [], updated: [], skipped: [] };
 

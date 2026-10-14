@@ -6,6 +6,9 @@ dist/
 lib/
 coverage/
 
+# 打包产物
+*.tgz
+
 # logs
 npm-debug.log*
 yarn-debug.log*

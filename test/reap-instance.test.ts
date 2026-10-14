@@ -175,8 +175,8 @@ test("多开：被网关锁认领的 daemon（含启动壳与 tail）不被回�
   const home = mkdtempSync(join(tmpdir(), "feishu-reap-test-"));
   try {
     // 【必须在 spawn 之前建好隔离 HOME 的 ~/.pi/agent】
-    // 未去 dsh 化的 gateway-lock 是「`~/.pi/agent` 存在才用机器级路径，否则退到 $DSH_HOME」
-    // 且在 import 时就定下 LOCKS_PATH；不先建目录的话，探针写进隔离 HOME 的锁根本不被读到，
+    // gateway-lock 在 import 时就定下 LOCKS_PATH = `~/.pi/agent/locks.json`；
+    // 不先建目录的话，探针写进隔离 HOME 的锁根本不被读到，
     // keep 集合为空 → 连「有主」的 daemon 也会被杀，这条用例在那种克隆里必假红。
     mkdirSync(join(home, ".pi", "agent"), { recursive: true });
     const result = spawnSync(process.execPath, ["--experimental-strip-types", "-e", PROBE], {

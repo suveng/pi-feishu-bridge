@@ -22,17 +22,11 @@ function lockKeyFor(appId: string | undefined) {
 }
 
 /**
- * 锁文件选址：机器上有 Pi 数据目录时沿用老位置，保证 Pi 与 Harness
- * 仍能互相协商同一个机器人的连接；纯 dsh 环境放进 dsh 家目录，
- * 不再凭空创建 ~/.pi。
+ * 锁文件选址：一律在 Pi 的 agent 目录（`~/.pi/agent/locks.json`）。
+ * 锁按 appId 全局互斥是护栏：飞书长连接是集群模式、不广播，
+ * 同一台机器上多个工作区共用同一个机器人会互相抢连接，所以要放在机器级位置协商。
  */
-function resolveLocksPath(): string {
-  if (existsSync(PI_AGENT_DIR)) return join(PI_AGENT_DIR, "locks.json");
-  const dshHome = process.env.DSH_HOME?.trim() || join(homedir(), ".dsh");
-  return join(dshHome, "locks.json");
-}
-
-const LOCKS_PATH = resolveLocksPath();
+const LOCKS_PATH = join(PI_AGENT_DIR, "locks.json");
 
 export type GatewayOwner = {
   key: string;

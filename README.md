@@ -1,12 +1,12 @@
 # ax-feishu-bridge
 
-支持 Deepseek Harness/Pi  接入 飞书/Lark 的消息桥接扩展：在熟悉的聊天界面里与本机 DSH/Pi 持续协作。
+Pi 接入 飞书/Lark 的消息桥接扩展：在熟悉的聊天界面里与本机 Pi 持续协作。
 
 <p align="center">
   <b>中文</b> · <a href="./README_EN.md">English</a>
 </p>
 
-DSH、Pi飞书交流反馈群：<https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=57dvecbb-95d3-4d01-b689-6ebc3d17c867>
+Pi 飞书交流反馈群：<https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=57dvecbb-95d3-4d01-b689-6ebc3d17c867>
 
 扩展有什么问题可以加群反馈。
 
@@ -40,51 +40,6 @@ B站：<https://space.bilibili.com/4489397>
 
 
 ## 快速开始
-
-> 下面的快速开始先介绍 **DeepSeek Harness（DSH）**，Pi 用户可直接跳到 [Pi 快速开始](#pi-quick-start)。
-
-<a id="dsh-quick-start"></a>
-
-### DeepSeek Harness（DSH）
-
-本扩展同时以 DeepSeek Harness 组合包（bundle）形式分发，飞书机器人的配置和聊天体验与 Pi 一致。
-
-#### 1. 安装
-
-前提：本机已安装 dsh
-
-从 npm 安装
-
-```bash
-dsh plugin --profile web add ax-feishu-bridge --ignore-scripts
-```
-
-
-
-#### 2. 启动与首次配置
-
-
-安装后重启dsh,如果没有检测到飞书机器人配置，会自动进入终端配置向导：推荐选择“扫码自动创建飞书助手”，按提示扫描终端里的二维码即可；如果你已经有现成的飞书/Lark 应用，也可以选择手动填写 App ID 和 App Secret。
-
-配置完成后桥接会自动启动并连上飞书/Lark，之后每次启动 dsh 也会自动连接。
-
-> DSH 使用独立的配置文件名 `config.harness.json`（放在同一个实例目录的 `harness/` 子目录里），与 Pi 的配置互不干扰，两边可以同时安装、共存。
-
-#### 3. 在飞书里互动
-
-- 私聊：直接发消息
-- 群聊：根据群聊策略决定是否需要 `@` 机器人
-- 话题：每个话题会独立对应一个会话
-
-**群聊策略设为open后，想要不@机器人就能回复任何群内消息，还需要到飞书开发者后台 - 对应机器人事件与回调 - 打开“获取群组中所有消息”或“获取群组中用户和机器人发送的消息”这两个任意一个权限。**
-![图片说明](docs/images/1.jpeg)
-
-`/new`、`/resume`、`/model`、`/thinking`、`/stop`、`/workspace`、`/status`、`/config` 等聊天内命令同样可用，完整列表见下文“飞书里怎么用”。
-
-两点区别需要注意：
-
-- DSH 的 `/feishu` 管理命令是精简版：提供 `setup / status / autostart / debug / reset`，没有 `start / stop / restart`——桥接随 dsh 自动启停，由配置里的 `autoStart` 控制。
-- DSH 的环境变量前缀是 `HARNESS_`（例如 `HARNESS_APP_ID`），而不是 Pi 的 `FEISHU_`；卡片回调端口也都按实例目录派生到 `3003-3099`（Pi 与 DSH 各占一个），两边同时启用也不会冲突。
 
 <a id="pi-quick-start"></a>
 
@@ -274,24 +229,6 @@ Windows PATH 加入 C:\Program Files\Git\bin
 
 ***
 
-## DSH 里怎么管理
-
-在 DSH 的 web 输入框或终端里输入（依赖宿主 DSH 的命令能力；宿主未提供时会静默跳过，不影响桥接本身）：
-
-| 命令                     | 作用                                          |
-| ---------------------- | ------------------------------------------- |
-| `/feishu setup`        | 重新配置机器人；问答与二维码在 DSH 进程所在终端进行，已有配置时先确认覆盖 |
-| `/feishu status`       | 查看连接状态、当前 owner 和配置                  |
-| `/feishu autostart`    | 开关自动启动                                 |
-| `/feishu debug`        | 查看最近 20 条调试日志                        |
-| `/feishu reset confirm` | 清除配置和映射，但保留会话历史                    |
-
-与 Pi 的区别：DSH 不提供 `/feishu start | stop | restart`——桥接随 dsh 自动启停，`setup` / `reset` 之后把插件重启 dsh，新配置即可生效。
-
-> 注意（DSH 平台限制）：命令结果以可折叠的命令节点显示在对话流里，但**空白的全新会话不渲染命令记录**——如果敲了命令没看到任何反应，先在该会话里发一条普通消息，再执行命令即可。`setup` 不受影响（问答与二维码在终端）。
-
-***
-
 ## 配置
 
 配置默认保存在：
@@ -322,7 +259,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 | `FEISHU_AUTO_START`   | `1` 或 `0`                     |
 | `FEISHU_CARD_ACTION_MODE` | `webhook` 或 `ws`，默认 `webhook` |
 | `FEISHU_CARD_ACTION_WEBHOOK_HOST` | 卡片回调监听地址，默认 `0.0.0.0` |
-| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | 卡片回调端口，按实例目录派生（稳定落在 `3003-3099`；DSH 用 `HARNESS_CARD_ACTION_WEBHOOK_PORT`，同样派生）；显式设置时优先 |
+| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | 卡片回调端口，按实例目录派生（稳定落在 `3003-3099`）；显式设置时优先 |
 | `FEISHU_CARD_ACTION_WEBHOOK_PATH` | 卡片回调路径，默认 `/webhook/card` |
 | `FEISHU_PROMPT_NOTIFY_SEC` | 长任务超过多少秒后在飞书发一条“仍在处理中”提示，默认 `180`，`0` 关闭 |
 | `FEISHU_PROMPT_TIMEOUT_SEC` | 任务硬超时秒数，超时后中止任务并报失败，默认 `0`（不设硬超时，长期运行也不会被报失败） |
@@ -352,7 +289,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 
 ### 运行时配置
 
-以下桥接设置可以在**与机器人的私聊**里用 `/config` 立即修改，无需重启，并保存到各自实例目录下的 `runtime-overrides.json`（Pi 为 `<工作区>/.pi/feishu/`，DSH 为 `<工作区>/.pi/feishu/harness/`）：
+以下桥接设置可以在**与机器人的私聊**里用 `/config` 立即修改，无需重启，并保存到实例目录下的 `runtime-overrides.json`（`<工作区>/.pi/feishu/`）：
 
 ```text
 /config
@@ -405,10 +342,9 @@ cd ~/work/b && pi
 | --- | --- |
 | `config.pi.json` / `state.pi.json` / `bridge.pi.json` / `debug.pi.log` / `daemon.log` / `runtime-overrides.json` | `<工作区>/.pi/feishu/`（设了 `FEISHU_DATA_DIR` 则为 `$FEISHU_DATA_DIR/`） |
 | 附件收件箱 | `<实例目录>/inbox/` |
-| DSH 侧同名文件 | `<实例目录>/harness/` |
 | 卡片回调端口 | 由实例目录派生，稳定落在 `3003-3099` |
 
-**故意不隔离的**只有连接锁：`~/.pi/agent/locks.json`（纯 DSH 环境为 `~/.dsh/locks.json`）。
+**故意不隔离的**只有连接锁：`~/.pi/agent/locks.json`。
 它必须全局唯一，否则两个实例都能抢到同一个机器人。
 
 回调端口按目录稳定派生：同一个目录每次算出的端口一样，所以飞书开放平台里的回调地址
@@ -430,11 +366,10 @@ cd ~/work/b && pi
 | `<工作区>/.pi/feishu/owner-workspace.json` | 属主工作区记录（搬迁与裸开保护用来判断这份数据属于谁） |
 | `~/.pi/agent/locks.json`         | 当前飞书连接的 owner 锁（故意全局唯一）   |
 | `~/.pi/agent/sessions/`          | 每个飞书会话对应的 Pi 会话文件 |
-| `<工作区>/.pi/feishu/harness/`    | DSH 侧的配置、状态与日志（仅安装 DSH 时产生） |
 
-> 连接锁选址：机器上装有 Pi（存在 `~/.pi/agent` 目录）时沿用 `~/.pi/agent/locks.json`，保证两边能协商同一个机器人的连接；纯 DSH 环境则使用 `~/.dsh/locks.json`。
+> 连接锁始终放在 `~/.pi/agent/locks.json`：飞书长连接是集群模式、不广播，同一台机器上两个工作区共用同一个机器人会互抢连接，所以锁必须全局唯一。
 
-> 实例目录默认是 `<工作区>/.pi/feishu`（DSH 侧为 `<工作区>/.pi/feishu/harness/`）；设了 `FEISHU_DATA_DIR` 时整表挪到 `$FEISHU_DATA_DIR/`。只有 `locks.json` 例外，它始终留在全局 —— 必须全局唯一，否则两个实例都能抢到同一个机器人。
+> 实例目录默认是 `<工作区>/.pi/feishu`；设了 `FEISHU_DATA_DIR` 时整表挪到 `$FEISHU_DATA_DIR/`。只有 `locks.json` 例外，它始终留在全局 —— 必须全局唯一，否则两个实例都能抢到同一个机器人。
 
 ***
 
@@ -450,7 +385,7 @@ cd ~/work/b && pi
 - `/workspace` 当前只支持绝对路径，或 `~/` 开头的路径。
 - `/resume` 默认先显示当前项目的最近历史会话，也可以在卡片里切到“全部会话”并翻页浏览。
 - 卡片按钮现在优先走 webhook 回包模式；如果你还想临时沿用旧的 WS 更新方式，可以把 `FEISHU_CARD_ACTION_MODE` 设成 `ws`。
-- 卡片回调默认监听 `0.0.0.0:<派生端口>/webhook/card`：端口按实例目录稳定派生到 `3003-3099`（Pi 与 DSH 各占一个，互不冲突），需要在飞书开发者后台把交互卡片回调地址指到一个外部可访问的 URL；要固定端口就显式设 `FEISHU_CARD_ACTION_WEBHOOK_PORT`。
+- 卡片回调默认监听 `0.0.0.0:<派生端口>/webhook/card`：端口按实例目录稳定派生到 `3003-3099`，需要在飞书开发者后台把交互卡片回调地址指到一个外部可访问的 URL；要固定端口就显式设 `FEISHU_CARD_ACTION_WEBHOOK_PORT`。
 
 ***
 

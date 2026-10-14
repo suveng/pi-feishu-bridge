@@ -94,7 +94,7 @@ export type LearnApprovalConfig = {
 export type ModelSelection = {
   provider: string;
   id: string;
-  /** 思考强度档位（可选，Harness 适配器持久化用；Pi 存在会话内部）。 */
+  /** 思考强度档位（可选；Pi 存在会话内部，不在此持久化）。 */
   thinkingLevel?: string;
 };
 

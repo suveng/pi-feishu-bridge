@@ -1,12 +1,12 @@
 # ax-feishu-bridge
 
-A Feishu/Lark message-bridge extension for DeepSeek Harness and Pi — keep collaborating with your local DSH/Pi right inside your familiar chat interface.
+A Feishu/Lark message-bridge extension for the Pi coding agent — keep collaborating with your local Pi right inside your familiar chat interface.
 
 <p align="center">
   <a href="./README.md">中文</a> · <b>English</b>
 </p>
 
-DSH & Pi Feishu feedback group: <https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=57dvecbb-95d3-4d01-b689-6ebc3d17c867>
+Pi Feishu feedback group: <https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=57dvecbb-95d3-4d01-b689-6ebc3d17c867>
 
 Join the group to report any issues with the extension.
 
@@ -40,50 +40,6 @@ Bilibili: <https://space.bilibili.com/4489397>
 
 
 ## Quick Start
-
-> The quick start below begins with **DeepSeek Harness (DSH)**; Pi users can jump straight to [Pi Quick Start](#pi-quick-start).
-
-<a id="dsh-quick-start"></a>
-
-### DeepSeek Harness (DSH)
-
-This extension is also distributed as a DeepSeek Harness bundle. Bot setup and the chat experience are the same as Pi.
-
-#### 1. Install
-
-Prerequisite: dsh is already installed on your machine
-
-Install from npm
-
-```bash
-dsh plugin --profile web add ax-feishu-bridge --ignore-scripts
-```
-
-#### 2. Launch and First-Time Setup
-
-After installation, restart dsh. If no Feishu bot configuration is detected, a terminal setup wizard starts automatically: it is recommended to choose "scan QR code to auto-create the Feishu assistant" and scan the QR code in the terminal as prompted; if you already have an existing Feishu/Lark app, you can also enter the App ID and App Secret manually.
-
-After setup, the bridge starts automatically and connects to Feishu/Lark, and it reconnects automatically every time you start dsh afterwards.
-
-> DSH uses its own config file name `config.harness.json` (inside the `harness/` subdirectory of the same instance directory), separate from Pi's config — the two can be installed side by side and coexist.
-
-#### 3. Interacting in Feishu
-
-Exactly the same as Pi:
-
-- DM: just send a message
-- Group chats: whether you need to `@` the bot depends on the group policy
-- Topics: each topic maps to its own independent session
-
-**If the group policy is set to `open` and you want the bot to reply to any group message without being @-mentioned, you must also enable either the "receive all messages in group chats" or the "receive messages sent by users and bots in group chats" permission under Events and Callbacks of the bot in the Feishu developer console.**
-![image](docs/images/1.jpeg)
-
-In-chat commands like `/new`, `/resume`, `/model`, `/thinking`, `/stop`, `/workspace`, `/status`, and `/config` are also available; see "Using It in Feishu" below for the full list.
-
-Two differences to note:
-
-- DSH offers a trimmed-down set of `/feishu` management commands: `setup / status / autostart / debug / reset`, but no `start / stop / restart` — the bridge starts and stops automatically with dsh, controlled by `autoStart` in the config.
-- DSH environment variables use the `HARNESS_` prefix (e.g. `HARNESS_APP_ID`) instead of Pi's `FEISHU_`; the card callback port is derived from the instance directory in both cases (stably `3003-3099`, one per side), so both can run side by side without conflicts
 
 <a id="pi-quick-start"></a>
 
@@ -273,24 +229,6 @@ Common commands to send to the bot:
 
 ***
 
-## Managing It inside DSH
-
-Type these in the DSH web composer or terminal (relies on the host DSH's command facility; silently skipped when the host doesn't provide it, without affecting the bridge itself):
-
-| Command               | Meaning                                          |
-| --------------------- | ------------------------------------------------ |
-| `/feishu setup`       | Reconfigure the bot; prompts and QR code appear in the terminal where the DSH process runs, with overwrite confirmation when a config exists |
-| `/feishu status`      | View connection status, current owner, and config |
-| `/feishu autostart`   | Toggle auto-start                                 |
-| `/feishu debug`       | View the last 20 debug log entries                |
-| `/feishu reset confirm` | Clear config and mappings, but keep session history |
-
-Difference from Pi: DSH does not provide `/feishu start | stop | restart` — the bridge starts and stops automatically with dsh. After `setup` / `reset`, restart dsh for the new config to take effect.
-
-> Note (DSH platform limitation): command results render as collapsible command nodes in the conversation flow, but **a brand-new blank session does not render command records** — if a command seems to do nothing, send any ordinary message in that session first, then run the command. `setup` is unaffected (its prompts and QR code live in the terminal).
-
-***
-
 ## Configuration
 
 Config is saved by default at:
@@ -321,7 +259,7 @@ It can also be configured via environment variables:
 | `FEISHU_AUTO_START`   | `1` or `0`                     |
 | `FEISHU_CARD_ACTION_MODE` | `webhook` or `ws`, default `webhook` |
 | `FEISHU_CARD_ACTION_WEBHOOK_HOST` | Card callback listen address, default `0.0.0.0` |
-| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | Card callback port, derived from the instance directory (stably within `3003-3099`; DSH uses `HARNESS_CARD_ACTION_WEBHOOK_PORT`, likewise derived); an explicit value wins |
+| `FEISHU_CARD_ACTION_WEBHOOK_PORT` | Card callback port, derived from the instance directory (stably within `3003-3099`); an explicit value wins |
 | `FEISHU_CARD_ACTION_WEBHOOK_PATH` | Card callback path, default `/webhook/card` |
 | `FEISHU_PROMPT_NOTIFY_SEC` | After a long task exceeds this many seconds, send a "still processing" notice in Feishu, default `180`, `0` disables |
 | `FEISHU_PROMPT_TIMEOUT_SEC` | Hard timeout in seconds; the task is aborted and reported failed on timeout, default `0` (no hard timeout — even long-running tasks won't be reported failed) |
@@ -348,7 +286,7 @@ In addition to the environment variables above, you can also set these in `confi
 
 ### Runtime settings
 
-The following bridge settings can be changed instantly with `/config` **in a direct message with the bot** — no restart needed — and are saved to `runtime-overrides.json` inside the instance directory (`<workspace>/.pi/feishu/` for Pi, `<workspace>/.pi/feishu/harness/` for DSH):
+The following bridge settings can be changed instantly with `/config` **in a direct message with the bot** — no restart needed — and are saved to `runtime-overrides.json` inside the instance directory (`<workspace>/.pi/feishu/`):
 
 ```text
 /config
@@ -392,10 +330,9 @@ Instance directory layout (default `<workspace>/.pi/feishu`):
 | --- | --- |
 | `config.pi.json` / `state.pi.json` / `bridge.pi.json` / `debug.pi.log` / `daemon.log` / `runtime-overrides.json` | `<workspace>/.pi/feishu/` (or `$FEISHU_DATA_DIR/` when set) |
 | Attachment inbox | `<instance dir>/inbox/` |
-| DSH-side files with the same names | `<instance dir>/harness/` |
 | Card callback port | Derived from the instance directory, stably within `3003-3099` |
 
-**The only thing deliberately left global** is the connection lock: `~/.pi/agent/locks.json` (or `~/.dsh/locks.json` in a DSH-only setup). It must be unique machine-wide, otherwise two instances could both claim the same bot.
+**The only thing deliberately left global** is the connection lock: `~/.pi/agent/locks.json`. It must be unique machine-wide, otherwise two instances could both claim the same bot.
 
 The callback port is derived stably from the directory: the same directory always yields the same port, so the callback URL in the Feishu developer console only needs to be configured once; different instance directories naturally land on different ports. To pin an exact port, set `FEISHU_CARD_ACTION_WEBHOOK_PORT` explicitly — explicit values win over the derived one.
 
@@ -415,7 +352,7 @@ The callback port is derived stably from the directory: the same directory alway
 | `~/.pi/agent/locks.json`         | Owner lock of the current Feishu connection   |
 | `~/.pi/agent/sessions/`          | Pi session files for each Feishu chat |
 
-> The instance directory defaults to `<workspace>/.pi/feishu` (DSH side: `<workspace>/.pi/feishu/harness/`); setting `FEISHU_DATA_DIR` moves the whole table to `$FEISHU_DATA_DIR/`. `locks.json` is the only exception and always stays global — it must be unique, otherwise two instances can claim the same bot.
+> The instance directory defaults to `<workspace>/.pi/feishu`; setting `FEISHU_DATA_DIR` moves the whole table to `$FEISHU_DATA_DIR/`. `locks.json` is the only exception and always stays global — it must be unique, otherwise two instances can claim the same bot.
 
 ***
 
@@ -429,7 +366,7 @@ The callback port is derived stably from the directory: the same directory alway
 - `/workspace` currently only supports absolute paths, or paths starting with `~/`.
 - `/resume` first shows the recent sessions of the current project by default; you can switch to "all sessions" in the card and page through them.
 - Card buttons now prefer webhook response mode; if you want to temporarily keep the older WS update flow, set `FEISHU_CARD_ACTION_MODE` to `ws`.
-- The card callback listens on `0.0.0.0:<derived port>/webhook/card`: the port is derived from the instance directory and stably lands in `3003-3099` (Pi and DSH each get their own, so they never collide). Point the interactive card callback URL to an externally reachable URL in the Feishu developer console; set `FEISHU_CARD_ACTION_WEBHOOK_PORT` to pin a fixed port.
+- The card callback listens on `0.0.0.0:<derived port>/webhook/card`: the port is derived from the instance directory and stably lands in `3003-3099`. Point the interactive card callback URL to an externally reachable URL in the Feishu developer console; set `FEISHU_CARD_ACTION_WEBHOOK_PORT` to pin a fixed port.
 
 ***
 
