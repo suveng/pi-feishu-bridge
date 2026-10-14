@@ -1,4 +1,4 @@
-# ax-feishu-bridge
+# pi-feishu-bridge
 
 Pi 接入 飞书/Lark 的消息桥接扩展：在熟悉的聊天界面里与本机 Pi 持续协作。
 
@@ -51,10 +51,12 @@ B站：<https://space.bilibili.com/4489397>
 pi install npm:ax-feishu-bridge
 ```
 
+> npm 上的发布名仍是 `ax-feishu-bridge`（与仓库名不同），这条装的即本仓代码。
+
 也可以从 Git 安装：
 
 ```bash
-pi install git:github.com/AX1202/ax-feishu-bridge
+pi install git:gitee.com/suveng/pi-feishu-bridge
 ```
 
 #### 2. 初始化配置

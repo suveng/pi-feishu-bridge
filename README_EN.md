@@ -1,4 +1,4 @@
-# ax-feishu-bridge
+# pi-feishu-bridge
 
 A Feishu/Lark message-bridge extension for the Pi coding agent — keep collaborating with your local Pi right inside your familiar chat interface.
 
@@ -51,10 +51,12 @@ Bilibili: <https://space.bilibili.com/4489397>
 pi install npm:ax-feishu-bridge
 ```
 
+> The published npm name is still `ax-feishu-bridge` (it differs from the repo name); this installs the code from this repository.
+
 You can also install from Git:
 
 ```bash
-pi install git:github.com/AX1202/ax-feishu-bridge
+pi install git:gitee.com/suveng/pi-feishu-bridge
 ```
 
 #### 2. Initial Setup

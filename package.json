@@ -15,13 +15,13 @@
     "lark",
     "extension"
   ],
-  "homepage": "https://github.com/AX1202/ax-feishu-bridge#readme",
+  "homepage": "https://gitee.com/suveng/pi-feishu-bridge#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AX1202/ax-feishu-bridge.git"
+    "url": "git+https://gitee.com/suveng/pi-feishu-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/AX1202/ax-feishu-bridge/issues"
+    "url": "https://gitee.com/suveng/pi-feishu-bridge/issues"
   },
   "publishConfig": {
     "access": "public"
