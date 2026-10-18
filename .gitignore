@@ -34,3 +34,4 @@ AGENTS.md
 
 # 实例数据（跟着工作区走，含机器人凭证，不入库）
 .pi/feishu/
+.codegraph/
