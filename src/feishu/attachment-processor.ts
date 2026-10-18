@@ -11,10 +11,12 @@
  */
 import {
   buildArchiveSection,
+  buildDocumentSection,
   decodeTextFile,
   detectCodeLanguage,
   detectImageMime,
   isArchiveFile,
+  isDocumentFile,
   isSupportedImageMime,
   isSupportedTextFile,
   saveArchiveToInbox,
@@ -113,6 +115,39 @@ export async function processAttachments(
           error: error instanceof Error ? error.message : String(error),
         });
         downloadErrors.push(error instanceof Error ? error.message : `压缩包下载失败：${fileName}`);
+      }
+      continue;
+    }
+
+    // 文档类（pdf / Word / Excel / PPT / epub）：二进制格式，Read 直接读会乱码，
+    // 与压缩包同一套打法 —— 落盘到收件箱，把路径和「按扩展名转换」的命令交给 agent。
+    if (isDocumentFile(fileName)) {
+      if (!transport) {
+        downloadErrors.push(`飞书连接不可用，文档无法下载：${fileName}`);
+        continue;
+      }
+      try {
+        // 文档可能很大（扫描版 PDF、带图 Word），超时同压缩包放宽
+        const resource = await withTimeout(
+          transport.downloadMessageResource(msg.messageId, attachment.fileKey, "file"),
+          60000,
+          `文档下载超时：${fileName}`,
+        );
+        const savedPath = saveArchiveToInbox(msg.messageId, fileName, resource.bytes);
+        debugLog("feishu.handler.document_saved", {
+          messageId: msg.messageId,
+          fileKey: attachment.fileKey,
+          path: savedPath,
+          bytes: resource.bytes.length,
+        });
+        fileSections.push(buildDocumentSection(fileName, savedPath, resource.bytes.length));
+      } catch (error) {
+        debugLog("feishu.handler.document_error", {
+          messageId: msg.messageId,
+          fileKey: attachment.fileKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        downloadErrors.push(error instanceof Error ? error.message : `文档下载失败：${fileName}`);
       }
       continue;
     }

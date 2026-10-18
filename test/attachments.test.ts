@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildArchiveSection,
+  buildDocumentSection,
   isArchiveFile,
+  isDocumentFile,
   isSupportedTextFile,
   sanitizeAttachmentName,
   saveArchiveToInbox,
@@ -63,4 +65,38 @@ test("buildArchiveSection 带出本地路径、体积与解压提示", () => {
   assert.match(section, /\/tmp\/inbox\/om_1\/app_logs\.zip（2\.4 MB）/);
   assert.match(section, /unzip -l/);
   assert.match(section, /python3 -m zipfile -l/);
+});
+
+// TC-BRIDGE-DOC-01：文档类扩展名识别
+test("isDocumentFile 认 pdf/Office/电子书，大小写不敏感", () => {
+  for (const name of ["合同.pdf", "需求.DOCX", "old.doc", "报表.xlsx", "sheet.xls", "汇报.pptx", "a.ppt", "b.rtf", "c.odt", "d.epub"]) {
+    assert.equal(isDocumentFile(name), true, name);
+  }
+  for (const name of ["app_logs.zip", "notes.txt", "a.log", "Makefile", "noext"]) {
+    assert.equal(isDocumentFile(name), false, name);
+  }
+});
+
+// TC-BRIDGE-DOC-02：文档不能被当文本读（否则二进制会乱码入 prompt）
+test("文档类不会被当成文本文件读", () => {
+  assert.equal(isSupportedTextFile("合同.pdf"), false);
+  assert.equal(isSupportedTextFile("报表.xlsx"), false);
+  assert.equal(isDocumentFile("合同.pdf") && isArchiveFile("合同.pdf"), false);
+});
+
+// TC-BRIDGE-DOC-03：说明段必须带本地路径、体积与按扩展名的转换命令
+test("buildDocumentSection 按扩展名给对应转换命令", () => {
+  const pdf = buildDocumentSection("合同.pdf", "/tmp/inbox/om_9/合同.pdf", 1_258_291);
+  assert.match(pdf, /\[Feishu document: 合同\.pdf\]/);
+  assert.match(pdf, /\/tmp\/inbox\/om_9\/合同\.pdf（1\.2 MB）/);
+  assert.match(pdf, /pypdf/);
+
+  const docx = buildDocumentSection("需求.docx", "/tmp/inbox/om_9/需求.docx", 2048);
+  assert.match(docx, /textutil -convert txt -stdout/);
+
+  const xlsx = buildDocumentSection("报表.xlsx", "/tmp/inbox/om_9/报表.xlsx", 1024);
+  assert.match(xlsx, /openpyxl/);
+
+  const pptx = buildDocumentSection("汇报.pptx", "/tmp/inbox/om_9/汇报.pptx", 1024);
+  assert.match(pptx, /python-pptx/);
 });

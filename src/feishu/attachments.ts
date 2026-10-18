@@ -62,6 +62,8 @@ export function sanitizeAttachmentName(name: string) {
  * 压缩包落盘到收件箱，返回绝对路径。
  * 为什么落盘而不是解压进 prompt：日志包动辄几十 MB，塞进上下文只会被截断。
  * 落盘后由 agent 自己 unzip/grep，诊断链路才是闭环的。
+ *
+ * 注：文档类附件（pdf/Office）也走这里 —— 都是「二进制、需要先落盘再由 agent 转换」。
  */
 export function saveArchiveToInbox(messageId: string, fileName: string, bytes: Buffer, baseDir = INBOX_DIR) {
   const dir = join(baseDir, sanitizeAttachmentName(messageId));
@@ -84,6 +86,55 @@ export function buildArchiveSection(fileName: string, path: string, bytes: numbe
     `已保存到本地：${path}（${formatBytes(bytes)}）`,
     `这是压缩包，未解压。先用 \`unzip -l "${path}"\`（或 \`python3 -m zipfile -l "${path}"\`）看条目，再解压需要的文件读取内容。`,
   ].join("\n");
+}
+
+/**
+ * 文档类附件：pdf / Office / 电子书。
+ * 单独一类的原因：既不是可解码文本（二进制），也不是压缩包，
+ * 但业务上必须能读 —— 合同、报表、需求文档都以这些格式发进飞书。
+ * 打法和压缩包一致：落盘到收件箱，把路径 + 转换命令交给 agent，由 agent 自己转成文本。
+ */
+const SUPPORTED_DOCUMENT_EXT = new Set([
+  ".pdf", ".doc", ".docx", ".rtf", ".odt",
+  ".xls", ".xlsx", ".ppt", ".pptx", ".epub",
+]);
+
+/** 是否是文档类附件（按扩展名判断，与压缩包/文本文件互斥） */
+export function isDocumentFile(fileName: string) {
+  const lower = fileName.toLowerCase();
+  const idx = lower.lastIndexOf(".");
+  if (idx < 0) return false;
+  return SUPPORTED_DOCUMENT_EXT.has(lower.slice(idx));
+}
+
+/**
+ * 生成文档类附件在 prompt 里的说明段：本地路径 + 按扩展名给的可直接复制命令。
+ * 统一用 `sys.argv[1]` 传路径，避免文件名里的引号/空格把命令打断。
+ */
+export function buildDocumentSection(fileName: string, path: string, bytes: number) {
+  const lower = fileName.toLowerCase();
+  const lines = [
+    `[Feishu document: ${fileName}]`,
+    `已保存到本地：${path}（${formatBytes(bytes)}）`,
+    "这是二进制文档，直接读会乱码。先转成文本再读，按扩展名选一条：",
+  ];
+  if (/\.(docx?|rtf|odt)$/.test(lower)) {
+    lines.push(`- Word/RTF：\`textutil -convert txt -stdout "${path}"\`（macOS 自带；其他平台用 \`pandoc "${path}" -t plain\`）`);
+  } else if (lower.endsWith(".pdf")) {
+    lines.push(
+      `- PDF：\`python3 -c "import sys;from pypdf import PdfReader;[print(p.extract_text() or '') for p in PdfReader(sys.argv[1]).pages]" "${path}"\``,
+    );
+    lines.push("- 没装 pypdf 就先 `python3 -m pip install --user pypdf`；装了 poppler 的话 `pdftotext 文件 -` 更省事");
+  } else if (/\.(xlsx?)$/.test(lower)) {
+    lines.push(
+      `- Excel：\`python3 -c "import sys,openpyxl;wb=openpyxl.load_workbook(sys.argv[1],data_only=True);[print(ws.title,ws.max_row,ws.max_column) for ws in wb]" "${path}"\`（先看有几个工作表，再逐表取值）`,
+    );
+  } else if (/\.(pptx?)$/.test(lower)) {
+    lines.push("- PPT：先另存为 PDF 再按 PDF 提取；或 `python3 -m pip install --user python-pptx` 后读每个 shape 的 text");
+  } else {
+    lines.push(`- 先用 \`file "${path}"\` 确认真实格式，再选对应工具`);
+  }
+  return lines.join("\n");
 }
 
 export function decodeTextFile(fileName: string, bytes: Buffer): { ok: true; text: string; truncated: boolean } | { ok: false } {
