@@ -15,8 +15,8 @@ import { autoSyncSlashCommands } from "./slash-commands.ts";
 const TEXT_CHUNK_MAX_BYTES = 120 * 1024;
 
 export class BotUnavailableError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "BotUnavailableError";
   }
 }
@@ -154,16 +154,23 @@ export class FeishuTransport {
 
   private async probeBotOpenId() {
     try {
-      const res = await this.sdkClient.request({
-        url: "/open-apis/bot/v3/info",
-        method: "GET",
-      });
+      // 探活这一步最容易撞上启动瞬间的瞬时断连（ECONNRESET / socket hang up）：
+      // 带重试再抛，避免一次抖动就让整个 daemon 放弃启动。
+      const res = await withRetry<any>(
+        () =>
+          this.sdkClient.request({
+            url: "/open-apis/bot/v3/info",
+            method: "GET",
+          }),
+        { maxRetries: 2, baseDelayMs: 500, label: "feishu.bot.probe" },
+      );
       this.botOpenId = res?.bot?.open_id || res?.data?.bot?.open_id || res?.data?.open_id;
       if (!this.botOpenId) {
         throw new Error(`bot/v3/info response missing open_id: ${JSON.stringify(res).slice(0, 200)}`);
       }
     } catch (error) {
-      throw new BotUnavailableError(error instanceof Error ? error.message : String(error));
+      // 保留原始错误当 cause：上层用 isRetriableError 判断「瞬时断连 vs 凭证错」时需要它。
+      throw new BotUnavailableError(error instanceof Error ? error.message : String(error), { cause: error });
     }
   }
 

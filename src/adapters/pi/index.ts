@@ -22,6 +22,7 @@ import {
   setRuntimeConfig,
 } from "../../feishu/runtime-config.ts";
 import { BotUnavailableError, FeishuTransport } from "../../feishu/transport.ts";
+import { withBackoffRetry } from "../../feishu/retry.ts";
 import type { FeishuConfig, FeishuStatus } from "../../feishu/types.ts";
 import { createCardActionHandler } from "../../feishu/card-actions.ts";
 import { LearnApprovalClient } from "../../feishu/learn-approval.ts";
@@ -38,6 +39,9 @@ import { PiConversationRuntime, handlePiMessageEnd } from "./PiConversationRunti
  */
 export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { extensionPath?: string }) {
   const extensionEntry = options?.extensionPath || fileURLToPath(import.meta.url);
+  // 启动重试的退避序列：4 次重试、累计约 15s。刻意压在网关锁 stale 阈值（30s）以内，
+  // 这样重试期间不需要额外心跳也不会被别的实例抢走锁。
+  const START_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
   // Pi 进程使用 Pi 自己的配置/状态/记录文件（默认即 Pi，显式声明便于维护）
   setRuntimeSource(PI_SOURCE);
   if (process.env[CHILD_SESSION_ENV] === "1") {
@@ -259,8 +263,20 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
       }
     });
     transport = new FeishuTransport(cfg, (msg) => messageHandler.handle(msg), createCardActionHandler(conversations, () => transport));
+    const startedTransport = transport;
     try {
-      await transport.start();
+      // 启动期一次性初始化最容易撞上瞬时断连（ECONNRESET / socket hang up）：
+      // 之前这里一次失败就 release 锁并 throw，daemon 随 process.exit(1) 消失、不重试。
+      // 现在按 1s→2s→4s→8s 退避重试（累计约 15s，远小于 30s 的锁 stale 阈值），
+      // 凭证类错误（403 / 999xxxxx）不是「可重试」，仍然立即失败退出。
+      await withBackoffRetry(() => startedTransport.start(), {
+        delaysMs: START_RETRY_DELAYS_MS,
+        onRetry: (error, attempt, delayMs) => {
+          const msg = error instanceof Error ? error.message : String(error);
+          console.error(`[feishu] 启动失败（${msg}），${delayMs}ms 后第 ${attempt} 次重试`);
+          updateStatus("connecting");
+        },
+      });
       gatewayLock.startHeartbeat();
       await gatewayLock.update("connected");
       updateStatus("connected");
