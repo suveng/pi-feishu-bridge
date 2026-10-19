@@ -236,10 +236,16 @@ export function getCommandList(): string {
  * 不等于「需求提出人」——流程侧按「拿不到就写未记录、不许猜」处理。
  * 缺字段时用「未知」占位，但标记行**必须始终存在且形状不变**（流程靠它做字符串匹配）。
  */
-export function buildRequesterMarker(openId?: string, chatType?: string): string {
+export function buildRequesterMarker(openId?: string, chatType?: string, name?: string): string {
   const id = openId?.trim() || "未知";
   const type = chatType?.trim() || "未知";
-  return `[飞书提出人] open_id=${id} chat_type=${type}`;
+  const who = name?.trim();
+  // name 追加在最后：`[飞书提出人] open_id=` 这个前缀形状保持不变，
+  // 流程侧（需求-命名 / 需求-分析 / 需求-开发）靠它原样读 open_id，加个尾巴不影响。
+  // 查不到姓名时完全退回旧形状（见 user-name.ts：缺 contact 字段权限就会查不到）。
+  return who
+    ? `[飞书提出人] open_id=${id} chat_type=${type} name=${who}`
+    : `[飞书提出人] open_id=${id} chat_type=${type}`;
 }
 
 /** 合并用户文本与引用父消息，供 agent 调查告警卡片等场景 */

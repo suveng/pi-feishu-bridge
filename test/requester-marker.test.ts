@@ -70,3 +70,17 @@ test("引用别人的话提需求：全篇只有一个 open_id（发消息的人
   assert.match(withQuote, /\[Quoted message\]/);
   assert.match(withQuote, /（某人转发的原话）把导出加一下/);
 });
+
+test("TC-BRIDGE-NAME-10 有姓名时追加在尾部，open_id 前缀形状不变", () => {
+  assert.equal(
+    buildRequesterMarker("ou_abc", "p2p", "张三"),
+    "[飞书提出人] open_id=ou_abc chat_type=p2p name=张三",
+  );
+  // 空白姓名退回旧形状（缺 contact 字段权限就是这种情况）
+  assert.equal(buildRequesterMarker("ou_abc", "p2p", "   "), "[飞书提出人] open_id=ou_abc chat_type=p2p");
+});
+
+test("TC-BRIDGE-NAME-11 buildPrompt 把姓名写进首行标记", () => {
+  const prompt = buildPrompt(makeMsg(), "看下这个", [], [], 0, false, [], "张三");
+  assert.match(prompt, /^\[飞书提出人\] open_id=ou_abc chat_type=p2p name=张三\n/);
+});

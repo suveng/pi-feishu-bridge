@@ -12,6 +12,7 @@ import {
   setRuntimeConfig,
 } from "./runtime-config.ts";
 import { conversationKey, conversationLabel, buildPromptWithQuote, buildRequesterMarker, getCommandList, normalizeForDedupe, parseBotCommand, parseMessageInput, pruneRecentMap, stripRerunMarker, textSimilarity, NEAR_DUPLICATE_THRESHOLD } from "./messages.ts";
+import { resolveUserName } from "./user-name.ts";
 import { ReplyCard, resolveCardTarget } from "./reply-card.ts";
 import type { FeishuBridgeStore } from "./bridge-store.ts";
 import type { FeishuTransport } from "./transport.ts";
@@ -167,7 +168,10 @@ export class FeishuMessageHandler {
         return;
       }
 
-      const basePrompt = buildPrompt(msg, text, fileSections, imageInputs, skippedImageCount, modelSupportsImage, downloadErrors);
+      // 提出人姓名（可选增强）：查不到（缺 contact 字段权限 / 超时 / 网络）就降级回 open_id，
+      // 绝不阻塞消息处理，也不抛错（见 user-name.ts 的口径）。
+      const senderName = await resolveUserName(msg.senderOpenId, cfg);
+      const basePrompt = buildPrompt(msg, text, fileSections, imageInputs, skippedImageCount, modelSupportsImage, downloadErrors, senderName);
       const prompt = buildPromptWithQuote(basePrompt, quoted);
       // 单卡：全程 header；流式参数来自 config/env
       const useStreaming = cfg?.streamingReply !== false;
@@ -435,6 +439,7 @@ export function buildPrompt(
   skippedImageCount: number,
   modelSupportsImage: boolean,
   downloadErrors: string[],
+  senderName?: string,
 ) {
   const contentParts: string[] = [];
   if (text.trim()) contentParts.push(text.trim());
@@ -454,7 +459,7 @@ export function buildPrompt(
   const promptBody = contentParts.join("\n\n").trim();
   // 首行固定标记（谁提的）：**必须放在正文之前**，且只在此处注入 ——
   // 不要塞进 buildPromptWithQuote 的引用块（那会把引用者的身份当成提出人）。
-  const marked = [buildRequesterMarker(msg.senderOpenId, msg.chatType), promptBody]
+  const marked = [buildRequesterMarker(msg.senderOpenId, msg.chatType, senderName), promptBody]
     .filter(Boolean)
     .join("\n");
   const label = conversationLabel(msg);
