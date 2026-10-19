@@ -9,6 +9,7 @@ import { buildMarkdownCardParts, buildPostMessages, chooseMessageMode } from "./
 import { withRetry } from "./retry.ts";
 import { extractTextFromMsgType } from "./interactive-card.ts";
 import { FeishuCardActionWebhook } from "./card-action-webhook.ts";
+import { sendLocalImage } from "./image-send.ts";
 import { autoSyncSlashCommands } from "./slash-commands.ts";
 
 const TEXT_CHUNK_MAX_BYTES = 120 * 1024;
@@ -581,6 +582,30 @@ export class FeishuTransport {
       },
     }));
     const id = res?.data?.message_id as string | undefined;
+    this.rememberBotOutboundMessageId(id);
+    return id;
+  }
+
+  /**
+   * 发一张本地图片到回复链上。
+   * 模型在正文里写 `![](/绝对路径.png)` 时由 ReplyCard 收尾调用。
+   * 失败不抛：图发不出去不该让整轮回复报错。
+   */
+  async replyLocalImage(messageId: string, filePath: string): Promise<string | undefined> {
+    debugLog("feishu.reply.local_image", { messageId, filePath });
+    const id = await this.apiCall("feishu.reply.local_image", () =>
+      sendLocalImage(this.sdkClient, { replyToMessageId: messageId }, filePath),
+    );
+    this.rememberBotOutboundMessageId(id);
+    return id;
+  }
+
+  /** 平铺发一张本地图片（不挂回复链） */
+  async sendLocalImage(chatId: string, filePath: string): Promise<string | undefined> {
+    debugLog("feishu.send.local_image", { chatId, filePath });
+    const id = await this.apiCall("feishu.send.local_image", () =>
+      sendLocalImage(this.sdkClient, { chatId }, filePath),
+    );
     this.rememberBotOutboundMessageId(id);
     return id;
   }

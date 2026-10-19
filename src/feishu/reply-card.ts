@@ -17,6 +17,7 @@ import { resolveStreamOptions, type ReplyCardStreamOptions } from "./reply-card-
 import { loadConfig } from "./config.ts";
 import { debugLog } from "./debug.ts";
 import { registerLiveCard, unregisterLiveCard } from "./live-cards.ts";
+import { flushLocalImages } from "./image-send.ts";
 
 export type { ReplyCardStatus, ReplyCardFinalStatus } from "./card-builder.ts";
 export {
@@ -82,6 +83,10 @@ type ReplyCardTransport = {
   updateText?(messageId: string, text: string): Promise<void>;
   /** 记录本 bot 出站消息，供 groupAlsoOnReply */
   rememberOutboundMessageId?(messageId: string): void;
+  /** 把本地图片发到回复链上（正文写了 `![](/绝对路径.png)` 时调用） */
+  replyLocalImage?(messageId: string, filePath: string): Promise<string | undefined>;
+  /** 平铺发本地图片（话题群/无回复锚点时用） */
+  sendLocalImage?(chatId: string, filePath: string): Promise<string | undefined>;
 };
 
 export class ReplyCard implements ReplyCardSink {
@@ -407,6 +412,23 @@ export class ReplyCard implements ReplyCardSink {
   ) {
     // paused 也要允许收尾：否则「等你选择」的卡永远停在中间态
     if (this.status !== "running" && this.status !== "paused") return;
+    await this.renderFinal(status, note);
+    // 卡片定稿之后再发图：图挂在下面，不打断流式更新
+    const replyToMessageId =
+      "replyToMessageId" in this.target ? this.target.replyToMessageId : undefined;
+    const chatId = "chatId" in this.target ? this.target.chatId : undefined;
+    await flushLocalImages({
+      body: this.body,
+      status,
+      target: { replyToMessageId, chatId },
+      transport: this.transport,
+    });
+  }
+
+  private async renderFinal(
+    status: ReplyCardFinalStatus,
+    note: string | undefined,
+  ) {
     // 已到终态：退出收尾不该再动它（用户可能已经看到完整的最终卡）
     unregisterLiveCard(this);
     const wasPaused = this.status === "paused";

@@ -1188,7 +1188,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       cwd: workspaceCwd,
       agentDir: getAgentDir(),
       systemPromptOverride: (base) => {
-        const extra = "You are replying through Feishu/Lark. Keep answers concise and readable in chat. Do not use markdown tables.";
+        const extra = "You are replying through Feishu/Lark. Keep answers concise and readable in chat. Do not use markdown tables. If you produced or saved an image file (screenshot, generated art, chart) and want the user to see it, put it on its own line as ![caption](/absolute/path/to/file.png) — the bridge uploads local images referenced this way and sends them as Feishu image messages (png/jpg/gif/webp/bmp, ≤10MB each, max 5 per reply). Relative paths resolve against the workspace cwd.";
         return base?.trim() ? `${base}\n\n${extra}` : extra;
       },
     });
