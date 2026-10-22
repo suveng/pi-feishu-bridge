@@ -208,6 +208,7 @@ export class FeishuTransport {
         chatType: "group",
         groupPolicy: cfg.groupPolicy,
         mentioned,
+        mentionAllOnly: !mentioned && this.hasMentionAll(message),
         text,
         keywords: cfg.groupKeywords || [],
         alsoOnReply: Boolean(cfg.groupAlsoOnReply),
@@ -305,6 +306,20 @@ export class FeishuTransport {
     const botOpenId = this.botOpenId;
     if (!botOpenId) return true;
     return mentions.some((m: any) => m?.id?.open_id === botOpenId || m?.id?.union_id === botOpenId);
+  }
+
+  /** 消息里是否 @ 了所有人（@_all），用于「@所有人不算 @ 机器人」的过滤 */
+  private hasMentionAll(message: any): boolean {
+    const mentions = Array.isArray(message.mentions) ? message.mentions : [];
+    const hit = mentions.some(
+      (m: any) =>
+        m?.key === "@_all" ||
+        m?.id?.open_id === "@_all" ||
+        m?.id?.union_id === "@_all",
+    );
+    if (hit) return true;
+    const raw = typeof message.content === "string" ? message.content : "";
+    return raw.includes("\"@_all\"") || raw.includes("@_all");
   }
 
   /** 是否回复/跟帖到本 bot 发出的消息 */

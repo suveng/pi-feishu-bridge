@@ -9,6 +9,7 @@ export type GroupTriggerDecision = {
     | "keyword"
     | "reply_to_bot"
     | "not_mentioned"
+    | "mention_all_only"
     | "no_keyword";
 };
 
@@ -20,6 +21,8 @@ export type GroupTriggerInput = {
   keywords: string[];
   alsoOnReply: boolean;
   replyToBot: boolean;
+  /** 消息里只有 @所有人（@_all）、并没有 @ 本机器人 */
+  mentionAllOnly?: boolean;
 };
 
 /** 解析关键词：逗号/分号分隔字符串，或字符串数组 */
@@ -98,6 +101,10 @@ export function shouldAcceptGroupMessage(input: GroupTriggerInput): GroupTrigger
   }
 
   if (input.groupPolicy === "open") {
+    // @所有人 不等于 @ 机器人：这种消息不触发，避免刷卡片（2026-10-22 强森要求）
+    if (input.mentionAllOnly) {
+      return { accept: false, reason: "mention_all_only" };
+    }
     return { accept: true, reason: "open" };
   }
 
