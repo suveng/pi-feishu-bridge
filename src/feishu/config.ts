@@ -231,6 +231,13 @@ export function removePath(path: string) {
   rmSync(path, { recursive: true, force: true });
 }
 
+/** 工具过程展示档位：off / steps / action / timeout（非法值当作未设，回落默认档） */
+function parseProgressMode(raw: unknown): "off" | "steps" | "action" | "timeout" | undefined {
+  const v = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (v === "off" || v === "steps" || v === "action" || v === "timeout") return v;
+  return undefined;
+}
+
 function parseBool(value: unknown, fallback: boolean): boolean {
   if (typeof value === "boolean") return value;
   if (typeof value === "string") {
@@ -327,6 +334,9 @@ export function loadBaseConfig(): FeishuConfig | undefined {
       streamFirstFlushMs: parsePositiveInt(env("STREAM_FIRST_FLUSH_MS"), DEFAULT_CONFIG.streamFirstFlushMs!),
       streamMinChars: parsePositiveInt(env("STREAM_MIN_CHARS"), DEFAULT_CONFIG.streamMinChars!),
       streamMaxBodyChars: parsePositiveInt(env("STREAM_MAX_BODY_CHARS"), DEFAULT_CONFIG.streamMaxBodyChars!),
+      progressMode: parseProgressMode(env("PROGRESS_MODE")),
+      progressMaxLines: parsePositiveInt(env("PROGRESS_MAX_LINES"), 50),
+      progressTimeoutSeconds: parsePositiveInt(env("PROGRESS_TIMEOUT_SECONDS"), 30),
       // 进化审批：环境变量只提供 approval_code，超时/轮询间隔走默认值
       learnApproval: parseLearnApproval(
         env("LEARN_APPROVAL_CODE") ? { approvalCode: env("LEARN_APPROVAL_CODE") } : undefined,
@@ -366,6 +376,11 @@ export function loadBaseConfig(): FeishuConfig | undefined {
     streamFirstFlushMs: cfg.streamFirstFlushMs,
     streamMinChars: cfg.streamMinChars,
     streamMaxBodyChars: cfg.streamMaxBodyChars,
+    // 工具过程展示：此前只认 runtime-overrides，写在 config.pi.json 里会被静默忽略
+    progressMode: parseProgressMode(cfg.progressMode),
+    progressMaxLines: typeof cfg.progressMaxLines === "number" ? cfg.progressMaxLines : undefined,
+    progressTimeoutSeconds:
+      typeof cfg.progressTimeoutSeconds === "number" ? cfg.progressTimeoutSeconds : undefined,
     learnApproval: parseLearnApproval(cfg.learnApproval),
   });
 }
