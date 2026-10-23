@@ -8,7 +8,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -66,11 +66,15 @@ test("TC-BRIDGE-IMG-05 同一张图重复引用只发一次", () => {
   assert.equal(refs.length, 1);
 });
 
-test("TC-BRIDGE-IMG-06 普通链接与行内代码不误判", () => {
-  const { png } = makeWorkspace();
+test("TC-BRIDGE-IMG-06 普通链接不误判、行内代码里的示例因文件不存在被跳过", () => {
+  const { dir, png } = makeWorkspace();
+  // 路径必须由本用例自己造：早先写死 /tmp/x.png，机器上只要真存在这个文件就会误报
+  // （2026-10-23 实测被一个遗留的 /tmp/x.png 打红）。
+  const ghost = join(dir, "ghost.png");
+  assert.equal(existsSync(ghost), false);
   const text = [
-    `[打开图片](${png})`, // 不是图片语法
-    "清理路径 `![x](/tmp/x.png)`", // 反引号里的示例不处理（正则只认 ![]()，会命中但文件不存在）
+    `[打开图片](${png})`, // 普通 markdown 链接，不是图片语法
+    `清理路径 \`![x](${ghost})\``, // 行内代码里的示例：正则仍会命中，但文件不存在 → 跳过
   ].join("\n");
   assert.deepEqual(extractLocalImages(text, process.cwd()), []);
 });
