@@ -17,7 +17,7 @@ import { resolveStreamOptions, type ReplyCardStreamOptions } from "./reply-card-
 import { loadConfig } from "./config.ts";
 import { debugLog } from "./debug.ts";
 import { registerLiveCard, unregisterLiveCard } from "./live-cards.ts";
-import { flushLocalImages } from "./image-send.ts";
+import { flushLocalImages, stripLocalImageMarkdown } from "./image-send.ts";
 
 export type { ReplyCardStatus, ReplyCardFinalStatus } from "./card-builder.ts";
 export {
@@ -340,7 +340,7 @@ export class ReplyCard implements ReplyCardSink {
             runId: this.runId,
             status: "paused",
             note,
-            body: this.body,
+            body: stripLocalImageMarkdown(this.body),
             title: this.title,
           }),
         );
@@ -382,7 +382,7 @@ export class ReplyCard implements ReplyCardSink {
           runId: this.runId,
           status: "answered",
           note: this.note,
-          body: this.body,
+          body: stripLocalImageMarkdown(this.body),
           title: this.title,
         }),
       );
@@ -418,7 +418,7 @@ export class ReplyCard implements ReplyCardSink {
       "replyToMessageId" in this.target ? this.target.replyToMessageId : undefined;
     const chatId = "chatId" in this.target ? this.target.chatId : undefined;
     await flushLocalImages({
-      body: this.body,
+      body: stripLocalImageMarkdown(this.body),
       status,
       target: { replyToMessageId, chatId },
       transport: this.transport,
@@ -469,7 +469,7 @@ export class ReplyCard implements ReplyCardSink {
             runId: this.runId,
             status,
             note: status === "done" ? undefined : this.note,
-            body: this.body,
+            body: stripLocalImageMarkdown(this.body),
             title: this.title,
           }),
         );

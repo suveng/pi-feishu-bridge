@@ -59,6 +59,31 @@ export function extractLocalImages(text: string, cwd: string): LocalImageRef[] {
   return refs;
 }
 
+/**
+ * 把正文里的「本地图片语法」降级成文字说明。
+ *
+ * 飞书卡片（CardKit）的 markdown 解析器会把 `![](/本地/路径.png)` 当成卡片图片元素，
+ * 而卡片图片只认 image_key —— 传本地路径会整张卡的更新被拒：
+ *   code 200570 `card contains invalid image keys`
+ * 结果是正文永远停在上一次成功的快照，用户看到的是「回复中」，而图片本身已单独发出去。
+ * 图片由 flushLocalImages 单独发消息，所以卡片正文里只需留一句「（图片见下）」。
+ *
+ * 只动本地路径；http(s) / data: 链接原样保留，交回飞书自己处理。
+ */
+export function stripLocalImageMarkdown(text: string): string {
+  if (!text) return "";
+  return text.replace(
+    /!\[([^\]]*)\]\(\s*([^)\s]+?)(?:\s+"[^"]*")?\s*\)/g,
+    (all: string, alt: string, rawPath: string) => {
+      const p = String(rawPath ?? "").trim();
+      if (!p) return all;
+      if (/^[a-z][a-z0-9+.-]*:/i.test(p)) return all;
+      const caption = String(alt ?? "").trim();
+      return caption ? `（图片见下：${caption}）` : "（图片见下）";
+    },
+  );
+}
+
 /** 上传一张本地图片，返回 image_key（失败返回 undefined，不抛） */
 export async function uploadImage(client: any, filePath: string): Promise<string | undefined> {
   try {

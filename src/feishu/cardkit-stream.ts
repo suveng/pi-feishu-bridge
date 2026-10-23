@@ -5,6 +5,7 @@
  * running 卡必须带「停止」按钮（与 card-builder 契约一致）。
  */
 import { buildCardKitCardJson, type ReplyCardStatus } from "./card-builder.ts";
+import { stripLocalImageMarkdown } from "./image-send.ts";
 import { ProgressChannel } from "./progress-channel.ts";
 import { byteLength } from "./progress-note.ts";
 import { sendOversizeProgressCard } from "./oversize-progress-card.ts";
@@ -257,7 +258,9 @@ export class CardKitStream {
   }
 
   /** 写入正文元件（全量文本）；sequence 与进度通道共享同一个递增计数器 */
-  private async putContent(text: string) {
+  private async putContent(raw: string) {
+    // 本地图片语法必须先降级：卡片只认 image_key，传本地路径会让整张卡更新被拒（200570）
+    const text = stripLocalImageMarkdown(raw);
     if (!this.cardId || text === this.lastSent) return;
     try {
       const t = await this.getToken();
@@ -405,7 +408,7 @@ export class CardKitStream {
     });
     const finalCard = buildCardKitCardJson({
       status: finalStatus,
-      body: this.fullText,
+      body: stripLocalImageMarkdown(this.fullText),
       note,
       key: this.conversationKey,
       runId: this.runId,

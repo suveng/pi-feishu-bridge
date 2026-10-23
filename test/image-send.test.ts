@@ -14,6 +14,7 @@ import { join } from "node:path";
 import {
   extractLocalImages,
   sendLocalImage,
+  stripLocalImageMarkdown,
   uploadImage,
 } from "../src/feishu/image-send.ts";
 
@@ -190,4 +191,21 @@ test("TC-BRIDGE-IMG-12 既无回复锚点也无 chat 时直接返回 undefined",
     },
   };
   assert.equal(await sendLocalImage(client, {}, png), undefined);
+});
+
+test("TC-BRIDGE-IMG-13 卡片正文里本地图片语法降级成文字（否则整卡 200570 被拒、卡死在回复中）", () => {
+  const text = "看图：\n![后台批量金币扣除](/tmp/a.png)\n下面是说明。";
+  const out = stripLocalImageMarkdown(text);
+  assert.equal(out.includes("/tmp/a.png"), false);
+  assert.match(out, /（图片见下：后台批量金币扣除）/);
+  assert.match(out, /下面是说明。/);
+  // 没有说明文字时也要降级，不能把路径留在卡里
+  assert.equal(stripLocalImageMarkdown("![x](/tmp/b.jpg)"), "（图片见下：x）");
+  assert.equal(stripLocalImageMarkdown("![](/tmp/c.gif)"), "（图片见下）");
+});
+
+test("TC-BRIDGE-IMG-14 网络图片与普通文字原样保留", () => {
+  assert.equal(stripLocalImageMarkdown("![远程](https://x.test/a.png)"), "![远程](https://x.test/a.png)");
+  assert.equal(stripLocalImageMarkdown("没有任何图片的正文"), "没有任何图片的正文");
+  assert.equal(stripLocalImageMarkdown(""), "");
 });
