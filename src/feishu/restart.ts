@@ -34,6 +34,11 @@ export type RestartTrigger = {
 export type RestartTicket = {
   version: 1;
   oldPid: number;
+  /**
+   * 老 daemon 的启动壳 pid —— 必须**在退出前**记下：老进程一退，它自己的 ppid 立刻被
+   * reparent 成 1，worker 再去查就查不到了（修复前的旧版本漏掉的孤儿 tail 就是这么留下的）。
+   */
+  launcherPid?: number;
   cwd: string;
   piBin: string;
   args: string[];
@@ -196,6 +201,7 @@ export async function requestRestart(options: RequestRestartOptions): Promise<{ 
   const ticket: RestartTicket = {
     version: 1,
     oldPid: process.pid,
+    launcherPid: process.ppid > 1 ? process.ppid : undefined,
     cwd,
     piBin: spec.piBin,
     args: spec.args,

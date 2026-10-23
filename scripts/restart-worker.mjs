@@ -170,7 +170,9 @@ async function main() {
   console.log(`[restart-worker] 票据 ${ticketPath} · 老 pid ${ticket.oldPid} · cwd ${ticket.cwd}`);
 
   // 1) 等老进程自己退（它发完「重启中」卡片、拉完我们就 return，正常 1s 内就没了）
-  const oldLauncherPid = parentPidOf(ticket.oldPid);
+  // 票据里的 launcherPid 是老 daemon 退出前记下的（最可靠）；老版本票据没有这个字段，
+  // 退回现查 ppid（只有在老 daemon 还没退时才有意义）。
+  const oldLauncherPid = ticket.launcherPid || parentPidOf(ticket.oldPid);
   const exitDeadline = Date.now() + 15_000;
   while (Date.now() < exitDeadline && isAlive(ticket.oldPid)) {
     if (Date.now() - started > 5_000) signal(ticket.oldPid, "SIGTERM");
