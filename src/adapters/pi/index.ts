@@ -806,12 +806,23 @@ function looksLikeFeishuDaemon(command: string, extensionPath: string) {
   return normalized.includes(`-e ${extensionPath}`);
 }
 
+/**
+ * 收掉 daemon 的启动壳 `bash -lc 'tail -f /dev/null | exec pi …'`。
+ *
+ * 只 kill 父 bash 是不够的：`tail -f /dev/null` 是它的**兄弟子进程**，父 bash 一死就被
+ * reparent 到 init，永久挂着——每重启一次漏一个（2026-10-23 实测：一次 /restart 后
+ * 孤儿 tail 从 7 涨到 8）。所以安全时按进程组整组收。
+ *
+ * 安全边界：detached spawn 的 launcher 自成一组（pgid == pid），组里只有 bash + tail + 本进程；
+ * 命令行里必须同时出现 `tail -f /dev/null` 与 `feishu/index.ts` 才动手，
+ * 否则（比如在用户终端里前台跑）宁可什么都不杀。
+ */
 function terminateLauncherParent() {
   if (process.platform === "win32") return;
   const parentPid = process.ppid;
   if (!parentPid || parentPid <= 1) return;
 
-  const result = spawnSync("ps", ["-wwaxo", "pid=,command="], { encoding: "utf8" });
+  const result = spawnSync("ps", ["-wwaxo", "pid=,pgid=,command="], { encoding: "utf8" });
   if (result.status !== 0) return;
 
   const line = result.stdout.split("\n")
@@ -819,6 +830,13 @@ function terminateLauncherParent() {
     .find((entry) => entry.startsWith(`${parentPid} `));
   if (!line) return;
   if (!line.includes("tail -f /dev/null") || !line.includes("feishu/index.ts")) return;
+  const pgid = Number(line.split(/\s+/)[1]);
+  if (Number.isFinite(pgid) && pgid === parentPid) {
+    try {
+      process.kill(-pgid, "SIGTERM");
+      return;
+    } catch {}
+  }
   try { process.kill(parentPid, "SIGTERM"); } catch {}
 }
 

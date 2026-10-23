@@ -92,6 +92,37 @@ function ownsLock(lockPath, launcherPid) {
   return undefined;
 }
 
+function psField(pid, field) {
+  if (process.platform === "win32") return undefined;
+  const res = spawnSync("ps", ["-o", `${field}=`, "-p", String(pid)], { encoding: "utf8" });
+  const value = res.stdout?.trim();
+  return value || undefined;
+}
+
+/**
+ * 收掉老 daemon 的启动壳 `bash -lc 'tail -f /dev/null | exec pi …'`。
+ *
+ * 老 daemon 自己退出时只 SIGTERM 了父 bash（旧版本行为），里面的 `tail -f /dev/null`
+ * 会被 reparent 到 init 永久挂着，每重启一次漏一个。worker 是新代码、每次现读，
+ * 所以在这里兜住：老进程死后按**进程组**整组收（detached spawn 的组里只有 bash+tail）。
+ */
+function cleanupLauncher(launcherPid) {
+  if (!launcherPid || launcherPid <= 1) return;
+  try {
+    const command = psField(launcherPid, "command");
+    if (!command || !command.includes("tail -f /dev/null")) return;
+    const pgid = Number(psField(launcherPid, "pgid"));
+    if (Number.isFinite(pgid) && pgid === launcherPid) {
+      process.kill(-pgid, "SIGTERM");
+    } else {
+      process.kill(launcherPid, "SIGTERM");
+    }
+    console.log(`[restart-worker] 已收掉老启动壳 ${launcherPid}（含 tail）`);
+  } catch (error) {
+    console.error(`[restart-worker] 收老启动壳失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function parentPidOf(pid) {
   if (process.platform === "win32") return undefined;
   const res = spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" });
@@ -139,6 +170,7 @@ async function main() {
   console.log(`[restart-worker] 票据 ${ticketPath} · 老 pid ${ticket.oldPid} · cwd ${ticket.cwd}`);
 
   // 1) 等老进程自己退（它发完「重启中」卡片、拉完我们就 return，正常 1s 内就没了）
+  const oldLauncherPid = parentPidOf(ticket.oldPid);
   const exitDeadline = Date.now() + 15_000;
   while (Date.now() < exitDeadline && isAlive(ticket.oldPid)) {
     if (Date.now() - started > 5_000) signal(ticket.oldPid, "SIGTERM");
@@ -151,6 +183,7 @@ async function main() {
     return;
   }
   console.log(`[restart-worker] 老进程已退出，耗时 ${Date.now() - started}ms`);
+  cleanupLauncher(oldLauncherPid);
 
   // 2) 按同一 spec 拉新 daemon
   rmSync(ticket.resultPath, { force: true });
