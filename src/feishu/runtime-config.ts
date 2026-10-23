@@ -42,7 +42,7 @@ export type RuntimeConfigView = {
    */
   messageDelivery?: "queue" | "interrupt";
   /**
-   * 工具执行过程展示档位（默认 steps）：
+   * 工具执行过程展示档位（默认 off）：
    * - off：不展示，等价于改造前
    * - steps：累积清单（工具名 + 命令 + 耗时 + 成败）
    * - action：只显示当前这一个工具
@@ -272,7 +272,7 @@ export function formatRuntimeConfig(cfg: RuntimeConfigView, overrides?: RuntimeO
     `streamPrintStep: ${cfg.streamPrintStep ?? ""}${mark("streamPrintStep")}`,
     `streamPushIntervalMs: ${cfg.streamPushIntervalMs ?? ""}${mark("streamPushIntervalMs")}`,
     `messageDelivery: ${cfg.messageDelivery ?? "queue"}${mark("messageDelivery")}`,
-    `progressMode: ${cfg.progressMode ?? "steps"}${mark("progressMode")}`,
+    `progressMode: ${cfg.progressMode ?? "off"}${mark("progressMode")}`,
     `progressMaxLines: ${cfg.progressMaxLines ?? 50}${mark("progressMaxLines")}`,
     `progressTimeoutSeconds: ${cfg.progressTimeoutSeconds ?? 30}${mark("progressTimeoutSeconds")}`,
     "",

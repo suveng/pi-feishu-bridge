@@ -57,7 +57,7 @@ export type FeishuConfig = {
   /** 服务端推送 fullText 到 CardKit 的间隔 ms（默认 120） */
   streamPushIntervalMs?: number;
   /**
-   * 工具执行过程展示档位（默认 steps）。
+   * 工具执行过程展示档位（默认 off）。
    * off 不展示；steps 累积清单；action 只显示当前工具；timeout 超阈值才提示。
    * 修改方式：飞书 `/config progressMode <值>` 或 Pi `/feishu progress <值>`。
    */

@@ -50,8 +50,8 @@ export function resolveStreamOptions(override?: ReplyCardStreamOptions) {
         ?? cfg?.streamPushIntervalMs
         ?? 120,
     ),
-    // 默认 steps：这次改造的诉求就是「想看全部过程」，嫌吵可以用 /config 降级
-    progressMode: override?.progressMode ?? cfg?.progressMode ?? "steps",
+    // 默认 off：不展示工具过程；想看过程用 /config progressMode <steps|action|timeout> 打开
+    progressMode: override?.progressMode ?? cfg?.progressMode ?? "off",
     progressMaxLines: clampInt(override?.progressMaxLines ?? cfg?.progressMaxLines ?? 50, 3, 100),
     progressTimeoutSeconds: Math.max(
       1,
