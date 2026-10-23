@@ -40,6 +40,7 @@ export const FEISHU_SLASH_COMMANDS: SlashCommandSpec[] = [
   { command: "stop", zh: "停止当前生成", en: "Stop the current reply" },
   { command: "config", zh: "查看或修改运行时配置（仅私聊）", en: "View or update runtime config (private chat only)" },
   { command: "commands", zh: "显示全部命令", en: "List all commands" },
+  { command: "restart", zh: "重启桥接进程并加载最新代码（保留会话上下文）", en: "Restart the bridge and reload code (session kept)" },
   // interrupt 模式为 Pi 侧实现
   { command: "delivery", zh: "设置「正在生成时又收到新消息」怎么处理（排队 / 立即打断，仅私聊）", en: "How to handle new messages while replying (queue / interrupt, DM only)" },
   // --- 由 Pi 侧扩展（knowledge-flow）注册的命令 ---

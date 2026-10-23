@@ -28,6 +28,17 @@ const NEAR_DUPLICATE_TTL_MS = 10 * 60 * 1000;
 /** 短消息（「好」「继续」）不参与近重复判断：误拦概率远大于收益 */
 const NEAR_DUPLICATE_MIN_CHARS = 8;
 
+/** `/restart` 的宿主实现由 Pi 适配器注入（只有它知道 daemon 启动形状与扩展入口） */
+export type RestartRequest = {
+  trigger: { messageId: string; chatId: string };
+  force?: boolean;
+  hasActiveRun: boolean;
+};
+
+export type FeishuMessageHandlerHooks = {
+  restart?: (request: RestartRequest) => Promise<{ ok: boolean; error?: string }>;
+};
+
 export class FeishuMessageHandler {
   private readonly seen = new Set<string>();
   private readonly recentContent = new Map<string, number>();
@@ -36,15 +47,18 @@ export class FeishuMessageHandler {
   private readonly conversations: ConversationRuntime;
   private readonly getTransport: () => FeishuTransport | undefined;
   private readonly bridgeStore?: FeishuBridgeStore;
+  private readonly hooks: FeishuMessageHandlerHooks;
 
   constructor(
     conversations: ConversationRuntime,
     getTransport: () => FeishuTransport | undefined,
     bridgeStore?: FeishuBridgeStore,
+    hooks?: FeishuMessageHandlerHooks,
   ) {
     this.conversations = conversations;
     this.getTransport = getTransport;
     this.bridgeStore = bridgeStore;
+    this.hooks = hooks ?? {};
   }
 
   reset() {
@@ -307,6 +321,37 @@ export class FeishuMessageHandler {
         return true;
       }
       await transport.replyCard(msg.messageId, buildDeliveryCard(loadConfig()?.messageDelivery));
+      return true;
+    }
+
+    if (command.name === "restart") {
+      // 重启会把当前连接掐断、所有会话的卡片收尾，群聊里手滑一次就影响全员
+      if (msg.chatType !== "p2p") {
+        await transport.replyText(
+          msg.messageId,
+          "为避免群聊成员重启服务影响所有人，/restart 仅支持在与机器人的私聊中使用。",
+        );
+        return true;
+      }
+      const restart = this.hooks.restart;
+      if (!restart) {
+        await transport.replyText(msg.messageId, "当前运行方式不支持在聊天里重启。请在 Pi 终端执行 `/feishu restart`。");
+        return true;
+      }
+      const status = this.conversations.getStatus(key);
+      if (status.hasActiveRun && command.force) {
+        await this.conversations.stopConversation(key, async (reply) => {
+          await transport.replyText(msg.messageId, reply);
+        });
+      }
+      const result = await restart({
+        trigger: { messageId: msg.messageId, chatId: msg.chatId },
+        force: command.force,
+        hasActiveRun: status.hasActiveRun && !command.force,
+      });
+      if (!result.ok) {
+        await transport.replyText(msg.messageId, `❌ 无法重启：${result.error || "未知原因"}`);
+      }
       return true;
     }
 

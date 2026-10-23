@@ -68,6 +68,8 @@ pi install git:gitee.com/suveng/pi-feishu-bridge
 | `/config groupKeywords 关键词1,关键词2` | 设置群聊关键词触发并立即生效 |
 | `/config streamingReply false` | 关闭流式展示，改用普通回复卡片 |
 | `/config clear groupKeywords` | 清除某项运行时配置覆盖 |
+| `/restart` | 重启桥接进程并加载最新代码/配置，**会话上下文保留**（仅私聊；卡片原地变成「已重启」） |
+| `/restart force` | 有回复正在生成时强制中止并重启 |
 
 ## Pi 里怎么管理
 

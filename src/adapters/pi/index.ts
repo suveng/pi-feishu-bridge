@@ -28,6 +28,8 @@ import { createCardActionHandler } from "../../feishu/card-actions.ts";
 import { LearnApprovalClient } from "../../feishu/learn-approval.ts";
 import { resolveCardTarget } from "../../feishu/reply-card.ts";
 import { installExitFlush } from "../../feishu/live-cards.ts";
+import { daemonCommand, daemonSpec } from "../../feishu/daemon-spec.ts";
+import { ackRestartIfPending, requestRestart, type RestartTrigger } from "../../feishu/restart.ts";
 import { PiConversationRuntime, handlePiMessageEnd } from "./PiConversationRuntime.ts";
 
 /**
@@ -69,7 +71,40 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     promptNotifySec: initialConfig?.promptNotifySec,
     promptTimeoutSec: initialConfig?.promptTimeoutSec,
   });
-  const messageHandler = new FeishuMessageHandler(conversations, () => transport, bridgeStore);
+  const messageHandler = new FeishuMessageHandler(conversations, () => transport, bridgeStore, {
+    /**
+     * 飞书里 `/restart`：换一份新代码继续跑，会话上下文不丢。
+     *
+     * 只在 daemon 里允许 —— TUI 里重启桥接是 `/feishu restart`，那条路径完全在进程内，
+     * 走这里反而会把用户的交互式会话一起杀掉。
+     */
+    restart: async (request) => {
+      const activeTransport = transport;
+      if (!activeTransport) return { ok: false, error: "飞书连接未就绪，无法重启。" };
+      if (process.env.PI_FEISHU_DAEMON !== "1") {
+        return { ok: false, error: "当前 Pi 不是桥接 daemon。在 Pi 终端里请用 `/feishu restart`。" };
+      }
+      const trigger: RestartTrigger = request.trigger;
+      const result = await requestRestart({
+        transport: activeTransport,
+        trigger,
+        extensionPath: extensionEntry,
+        cwd: process.cwd(),
+        hasActiveRun: request.hasActiveRun,
+        force: request.force,
+      });
+      if (!result.ok) return result;
+      // 卡片已发出、worker 已在等我们死：留 1.2s 让消息落库，然后**发 SIGTERM 给自己**而不是
+      // 直接 process.exit —— 只有信号路径会经过 installExitFlush()，把别的会话在跑的「回复中」
+      // 卡片统一收尾；直接 exit 会让那些卡永久停在「正在回复…」（2026-10-14 事故同因）。
+      // launcher 一起收，否则 `bash -lc 'tail -f /dev/null | exec pi …'` 的壳会残留。
+      setTimeout(() => {
+        terminateLauncherParent();
+        process.kill(process.pid, "SIGTERM");
+      }, 1200);
+      return result;
+    },
+  });
 
   // 扩展 UI 输出回传：knowledge-flow 等 Pi 扩展的 ctx.ui.notify 走这里回到飞书会话。
   // 以进程级 sink 为准：每个飞书会话各自的 DefaultResourceLoader 有独立的 pi.events 总线，
@@ -280,6 +315,9 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
       gatewayLock.startHeartbeat();
       await gatewayLock.update("connected");
       updateStatus("connected");
+      // 刚接过网关锁 = 很可能是一次 /restart 的结果：把上一张「重启中」卡片改成终态。
+      // 失败不影响连接（回执只是体验），所以不 await 抛错。
+      void ackRestartIfPending(startedTransport).catch(() => undefined);
       return "started";
     } catch (error) {
       updateStatus(error instanceof BotUnavailableError ? "bot unavailable" : "disconnected");
@@ -311,28 +349,14 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     ctx.ui.notify(withBuildTag(`飞书连接已启动。\nGateway pid=${result.pid}\nLog: ${DAEMON_LOG_PATH}`), "info");
   }
 
-  function quoteShell(value: string) {
-    return `'${value.replace(/'/g, `'\\''`)}'`;
+  // daemon 启动形状来自 feishu/daemon-spec.ts：/restart 的 worker 必须用完全相同的
+  // 参数拉起新进程，否则 looksLikeFeishuDaemon() 认不出它（见该文件注释）。
+  function daemonSpecForEntry() {
+    return daemonSpec(extensionEntry);
   }
 
-  function daemonSpec() {
-    const piBin = process.env.PI_BIN || "pi";
-    const args = [
-      "--mode", "rpc",
-      "--no-extensions",
-      "--no-skills",
-      "--no-prompt-templates",
-      "--no-themes",
-      "--no-context-files",
-      "--no-builtin-tools",
-      "-e", extensionEntry,
-    ];
-    return { extensionPath: extensionEntry, piBin, args };
-  }
-
-  function daemonCommand() {
-    const { piBin, args } = daemonSpec();
-    return `tail -f /dev/null | exec ${quoteShell(piBin)} ${args.map(quoteShell).join(" ")}`;
+  function daemonCommandForEntry() {
+    return daemonCommand(daemonSpecForEntry());
   }
 
   async function startDaemon(takeover = false) {
@@ -371,7 +395,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
           : `${process.env.USERPROFILE}\\AppData\\Roaming\\npm`;
         const piCliEntry = process.env.PI_CLI_ENTRY
           || `${npmPrefix}\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js`;
-        const { args } = daemonSpec();
+        const { args } = daemonSpecForEntry();
         child = spawn("node", [piCliEntry, ...args], {
           detached: true,
           cwd: process.cwd(),
@@ -382,7 +406,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
         // 否则 pi --mode rpc 会在 stdin EOF 后退出。
         if (child.stdin) (child.stdin as unknown as Readable).resume();
       } else {
-        child = spawn("bash", ["-lc", daemonCommand()], {
+        child = spawn("bash", ["-lc", daemonCommandForEntry()], {
           detached: true,
           cwd: process.cwd(),
           env: { ...process.env, PI_FEISHU_DAEMON: "1" },

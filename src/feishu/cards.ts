@@ -342,3 +342,72 @@ function sharedCardConfig() {
     update_multi: true,
   };
 }
+
+/**
+ * 重启回执卡。三态共用同一张卡（`transport.updateCard` 原地改写），
+ * 所以用户看到的是「重启中 → 已重启」，而不是两条互不相干的消息。
+ */
+export type RestartCardState =
+  | { stage: "restarting"; commit?: string; at: number }
+  | { stage: "done"; commit?: string; elapsedMs?: number; newPid?: number; at: number }
+  | { stage: "failed"; error: string; at: number }
+  | { stage: "unknown"; at: number };
+
+export function buildRestartCard(state: RestartCardState) {
+  const time = new Date(state.at).toLocaleTimeString("zh-CN", { hour12: false });
+  const commitOf = (value?: string) => (value ? `\n代码版本：\`${escapeMarkdown(value)}\`` : "");
+  if (state.stage === "restarting") {
+    return {
+      config: sharedCardConfig(),
+      header: { template: "blue", title: { tag: "plain_text", content: "🔄 正在重启桥接" } },
+      elements: [
+        {
+          tag: "markdown",
+          content: [
+            `开始时间：${time}`,
+            "正在重载最新代码。会话上下文会保留，重启后可以直接接着聊。",
+            "预计 2–4 秒；这段时间内发出的消息可能收不到，请等这张卡变成「已重启」再发。",
+          ].join("\n") + commitOf(state.commit),
+        },
+      ],
+    };
+  }
+  if (state.stage === "done") {
+    const seconds = typeof state.elapsedMs === "number" ? `${(state.elapsedMs / 1000).toFixed(1)}s` : "未知";
+    return {
+      config: sharedCardConfig(),
+      header: { template: "green", title: { tag: "plain_text", content: "✅ 桥接已重启" } },
+      elements: [
+        {
+          tag: "markdown",
+          content: [
+            `耗时：${seconds}${typeof state.newPid === "number" ? ` · pid ${state.newPid}` : ""}`,
+            "会话上下文已保留，继续发消息即可。",
+          ].join("\n") + commitOf(state.commit),
+        },
+      ],
+    };
+  }
+  if (state.stage === "failed") {
+    return {
+      config: sharedCardConfig(),
+      header: { template: "red", title: { tag: "plain_text", content: "❌ 桥接重启失败" } },
+      elements: [
+        {
+          tag: "markdown",
+          content: `${escapeMarkdown(state.error)}\n\n桥接当前可能已停止。请在 Pi 终端执行 \`/feishu start\` 重新拉起。`,
+        },
+      ],
+    };
+  }
+  return {
+    config: sharedCardConfig(),
+    header: { template: "orange", title: { tag: "plain_text", content: "✅ 桥接已重启（回执缺失）" } },
+    elements: [
+      {
+        tag: "markdown",
+        content: "重启 worker 未留下结果文件（可能中途被杀），但新进程已接管网关锁，可以正常发消息。",
+      },
+    ],
+  };
+}
