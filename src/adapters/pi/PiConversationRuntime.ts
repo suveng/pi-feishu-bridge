@@ -955,9 +955,9 @@ export class PiConversationRuntime implements ConversationRuntime {
       description:
         "Ask the user to pick from options in the Feishu chat. Renders an interactive card with buttons and returns the user's choices. "
         + "Use this instead of asking option questions as plain text (e.g. 'reply 1A 2A 3A') — typing letters back is a terrible experience.",
-      promptSnippet: "Ask the user multiple-choice questions as clickable Feishu card buttons.",
+      promptSnippet: "Ask the user multiple-choice questions as clickable Feishu card buttons (飞书的提问工具，非 wecom_ask)。",
       promptGuidelines: [
-        "Replying through Feishu and the user must choose between options: call feishu_ask, do not list options as plain text.",
+        "Replying through Feishu and the user must choose between options: call feishu_ask, do not list options as plain text, and do not call wecom_ask (that tool does not exist here).",
         "Keep option labels short (<= 10 chars) and in business wording; every option's description MUST give its pros and cons in one line each (「好处：…；坏处：…」). Non-technical requests MUST be phrased in business language — no proto field / table / function names.",
         "At most 4 questions per call; each question gets 2-4 options.",
         "Ask everything you need in ONE call (up to 4 questions). Ask again later only when the next question truly depends on the previous answer.",
@@ -1188,7 +1188,11 @@ export class PiConversationRuntime implements ConversationRuntime {
       cwd: workspaceCwd,
       agentDir: getAgentDir(),
       systemPromptOverride: (base) => {
-        const extra = "You are replying through Feishu/Lark. Keep answers concise and readable in chat. Do not use markdown tables. If you produced or saved an image file (screenshot, generated art, chart) and want the user to see it, put it on its own line as ![caption](/absolute/path/to/file.png) — the bridge uploads local images referenced this way and sends them as Feishu image messages (png/jpg/gif/webp/bmp, ≤10MB each, max 5 per reply). Relative paths resolve against the workspace cwd.";
+        const extra = "You are replying through Feishu/Lark. Keep answers concise and readable in chat. Do not use markdown tables. If you produced or saved an image file (screenshot, generated art, chart) and want the user to see it, put it on its own line as ![caption](/absolute/path/to/file.png) — the bridge uploads local images referenced this way and sends them as Feishu image messages (png/jpg/gif/webp/bmp, ≤10MB each, max 5 per reply). Relative paths resolve against the workspace cwd."
+          // 平台身份与工具选择：两个桥接注入的提问工具名不同（飞书 feishu_ask / 企微 wecom_ask），
+          // 不点名就会两端混用，或退回“回复 1A 2A”的纯文本选项
+          + " Platform: Feishu (飞书). When the user has to choose between options, call the `feishu_ask` tool (renders clickable card buttons) — never type options as text like '回复 1A 2A'."
+          + " `wecom_ask` / `wecom_*` tools belong to the WeCom (企业微信) bridge and do not exist in this Feishu session — never call or mention them; use `feishu_ask` instead.";
         return base?.trim() ? `${base}\n\n${extra}` : extra;
       },
     });
