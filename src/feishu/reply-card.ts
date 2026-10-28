@@ -418,7 +418,11 @@ export class ReplyCard implements ReplyCardSink {
       "replyToMessageId" in this.target ? this.target.replyToMessageId : undefined;
     const chatId = "chatId" in this.target ? this.target.chatId : undefined;
     await flushLocalImages({
-      body: stripLocalImageMarkdown(this.body),
+      // 这里必须传原文：卡片正文那边已各自 stripLocalImageMarkdown，而 flushLocalImages
+      // 要靠 `![](路径)` 才能抽出本地图片。传 strip 后的文本会让它永远抽不到图
+      // （2026-10-28 实测：debug.pi.log 里 feishu.reply_card.local_images 事件为 0 次，
+      //  用户连续三次反馈「怎么没看到图」）。
+      body: this.body,
       status,
       target: { replyToMessageId, chatId },
       transport: this.transport,

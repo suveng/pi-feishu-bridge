@@ -213,3 +213,30 @@ test("TC-BRIDGE-IMG-14 网络图片与普通文字原样保留", () => {
   assert.equal(stripLocalImageMarkdown("没有任何图片的正文"), "没有任何图片的正文");
   assert.equal(stripLocalImageMarkdown(""), "");
 });
+
+test("TC-BRIDGE-IMG-15 回复收尾发图用的是原文（卡片正文才 strip），否则图永远发不出去", async () => {
+  // 2026-10-28 的真实缺陷：finishFinal 把 stripLocalImageMarkdown(this.body) 传给
+  // flushLocalImages，而 flushLocalImages 靠 `![](路径)` 抽图 → 抽到 0 张，
+  // 用户连续三次反馈「怎么没看到图」而日志里 feishu.reply_card.local_images 一条都没有。
+  // 这里从 ReplyCard 收尾链路一路走到发图，锁住「必须用原文」这条不变量。
+  const { ReplyCard } = await import("../src/feishu/reply-card.ts");
+  const { dir, png } = makeWorkspace();
+  const sent: string[] = [];
+  const transport = {
+    replyLocalImage: async (_id: string, p: string) => {
+      sent.push(p);
+      return "om_fake_image";
+    },
+    updateCard: async () => undefined,
+  };
+  const card = new ReplyCard(
+    "p2p:test",
+    { replyToMessageId: "om_parent" },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    transport as any,
+    { progressMode: false } as any,
+  );
+  await card.completeWithAnswer(`登录页动效见下：![登录页动效](${png})`);
+  assert.deepEqual(sent, [png], `应把 ${png} 发出去，实际发出 ${sent.length} 张`);
+  assert.ok(dir);
+});
