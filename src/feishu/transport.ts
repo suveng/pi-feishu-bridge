@@ -613,10 +613,14 @@ export class FeishuTransport {
    * 模型在正文里写 `![](/绝对路径.png)` 时由 ReplyCard 收尾调用。
    * 失败不抛：图发不出去不该让整轮回复报错。
    */
-  async replyLocalImage(messageId: string, filePath: string): Promise<string | undefined> {
-    debugLog("feishu.reply.local_image", { messageId, filePath });
+  async replyLocalImage(
+    messageId: string,
+    filePath: string,
+    replyInThread?: boolean,
+  ): Promise<string | undefined> {
+    debugLog("feishu.reply.local_image", { messageId, filePath, replyInThread: Boolean(replyInThread) });
     const id = await this.apiCall("feishu.reply.local_image", () =>
-      sendLocalImage(this.sdkClient, { replyToMessageId: messageId }, filePath),
+      sendLocalImage(this.sdkClient, { replyToMessageId: messageId, replyInThread }, filePath),
     );
     this.rememberBotOutboundMessageId(id);
     return id;

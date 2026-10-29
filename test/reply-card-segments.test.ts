@@ -56,8 +56,8 @@ test("resolveCardTarget：普通会话平铺，话题群留在回复里", () => 
   });
   assert.deepEqual(
     threaded,
-    { replyToMessageId: "om_2" },
-    "话题群必须 reply，否则 create 会另开一个话题",
+    { replyToMessageId: "om_2", replyInThread: true },
+    "话题群必须 reply，且带上 replyInThread，否则图片会落在话题外",
   );
 });
 

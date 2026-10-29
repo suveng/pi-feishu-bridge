@@ -24,7 +24,14 @@ export const MAX_LOCAL_IMAGES_PER_TURN = 5;
 
 export type LocalImageRef = { path: string; alt?: string };
 
-export type ImageTarget = { replyToMessageId?: string; chatId?: string };
+/**
+ * 发图目标。
+ *
+ * `replyInThread` 只在**话题群**为 true：飞书的 reply 接口默认把回复挂在群主消息流里，
+ * 不带 `reply_in_thread` 的图片会跑到话题外，用户在自己的话题里根本看不到
+ * （2026-10-29 实测：文字卡片在话题内、图却落在群里，用户连问两次「图你没发我」）。
+ */
+export type ImageTarget = { replyToMessageId?: string; chatId?: string; replyInThread?: boolean };
 
 /**
  * 从正文里抽出「本地图片」引用。
@@ -123,7 +130,12 @@ export async function sendLocalImage(
     if (target.replyToMessageId) {
       const res = await client.im.message.reply({
         path: { message_id: target.replyToMessageId },
-        data: { msg_type: "image", content },
+        data: {
+          msg_type: "image",
+          content,
+          // 话题群必须显式声明，否则图落在群主消息流、话题里看不到
+          ...(target.replyInThread ? { reply_in_thread: true } : {}),
+        },
       });
       return res?.data?.message_id as string | undefined;
     }
@@ -145,7 +157,11 @@ export async function sendLocalImage(
 
 /** 发图需要的最小 transport 面（与 ReplyCardTransport 的两个可选方法同形） */
 export type LocalImageTransport = {
-  replyLocalImage?(messageId: string, filePath: string): Promise<string | undefined>;
+  replyLocalImage?(
+    messageId: string,
+    filePath: string,
+    replyInThread?: boolean,
+  ): Promise<string | undefined>;
   sendLocalImage?(chatId: string, filePath: string): Promise<string | undefined>;
 };
 
@@ -171,7 +187,11 @@ export async function flushLocalImages(input: {
   for (const ref of picked) {
     try {
       const id = input.target.replyToMessageId
-        ? await input.transport.replyLocalImage?.(input.target.replyToMessageId, ref.path)
+        ? await input.transport.replyLocalImage?.(
+            input.target.replyToMessageId,
+            ref.path,
+            input.target.replyInThread,
+          )
         : input.target.chatId
           ? await input.transport.sendLocalImage?.(input.target.chatId, ref.path)
           : undefined;

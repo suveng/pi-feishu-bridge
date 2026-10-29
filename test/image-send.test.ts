@@ -128,6 +128,32 @@ test("TC-BRIDGE-IMG-09 有回复锚点时用 reply 发图", async () => {
   assert.equal(calls[0].arg.path.message_id, "om_src");
   assert.equal(calls[0].arg.data.msg_type, "image");
   assert.deepEqual(JSON.parse(calls[0].arg.data.content), { image_key: "k1" });
+  // 非话题群不能多带 reply_in_thread，否则会把普通回复变成话题
+  assert.equal(calls[0].arg.data.reply_in_thread, undefined);
+});
+
+test("TC-BRIDGE-IMG-09b 话题群发图带 reply_in_thread，否则图落在话题外", async () => {
+  const { png } = makeWorkspace();
+  const calls: any[] = [];
+  const client = {
+    im: {
+      image: { create: async () => ({ data: { image_key: "k1" } }) },
+      message: {
+        reply: async (arg: any) => {
+          calls.push({ kind: "reply", arg });
+          return { data: { message_id: "om_reply" } };
+        },
+        create: async () => {
+          throw new Error("不该走 create");
+        },
+      },
+    },
+  };
+  // replyInThread=true 是话题群的唯一标记：飞书 reply 默认把消息挂在群主消息流，
+  // 不带这个字段就跑到话题外（2026-10-29 实测用户看不到图）
+  const id = await sendLocalImage(client, { replyToMessageId: "om_src", replyInThread: true }, png);
+  assert.equal(id, "om_reply");
+  assert.equal(calls[0].arg.data.reply_in_thread, true);
 });
 
 test("TC-BRIDGE-IMG-10 没有回复锚点时平铺发到 chat", async () => {

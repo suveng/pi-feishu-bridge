@@ -30,7 +30,9 @@ export {
  * 这张卡发到哪里。
  * chatId 优先（平铺一条新消息）；话题群/回复链必须用 replyToMessageId。
  */
-export type ReplyCardTarget = CardKitTarget | { chatId: string; replyToMessageId?: string };
+export type ReplyCardTarget =
+  | (CardKitTarget & { replyInThread?: boolean })
+  | { chatId: string; replyToMessageId?: string; replyInThread?: boolean };
 
 /** 路由快照：只取 resolveCardTarget 需要的字段，便于单测 */
 export type CardRouteLike = {
@@ -49,7 +51,11 @@ export type CardRouteLike = {
  * 否则 create 会另开一个话题。
  */
 export function resolveCardTarget(route: CardRouteLike): ReplyCardTarget {
-  if (route.threadMessageId) return { replyToMessageId: route.lastMessageId };
+  // replyInThread 必须跟着走：话题群里 reply 不带它，图片会落到群主消息流，
+  // 用户在话题里看不到（文字卡片是 CardKit reply，不受影响，于是只丢图）
+  if (route.threadMessageId) {
+    return { replyToMessageId: route.lastMessageId, replyInThread: true };
+  }
   return { chatId: route.chatId };
 }
 
@@ -84,7 +90,11 @@ type ReplyCardTransport = {
   /** 记录本 bot 出站消息，供 groupAlsoOnReply */
   rememberOutboundMessageId?(messageId: string): void;
   /** 把本地图片发到回复链上（正文写了 `![](/绝对路径.png)` 时调用） */
-  replyLocalImage?(messageId: string, filePath: string): Promise<string | undefined>;
+  replyLocalImage?(
+    messageId: string,
+    filePath: string,
+    replyInThread?: boolean,
+  ): Promise<string | undefined>;
   /** 平铺发本地图片（话题群/无回复锚点时用） */
   sendLocalImage?(chatId: string, filePath: string): Promise<string | undefined>;
 };
@@ -417,6 +427,7 @@ export class ReplyCard implements ReplyCardSink {
     const replyToMessageId =
       "replyToMessageId" in this.target ? this.target.replyToMessageId : undefined;
     const chatId = "chatId" in this.target ? this.target.chatId : undefined;
+    const replyInThread = "replyInThread" in this.target ? this.target.replyInThread : undefined;
     await flushLocalImages({
       // 这里必须传原文：卡片正文那边已各自 stripLocalImageMarkdown，而 flushLocalImages
       // 要靠 `![](路径)` 才能抽出本地图片。传 strip 后的文本会让它永远抽不到图
@@ -424,7 +435,7 @@ export class ReplyCard implements ReplyCardSink {
       //  用户连续三次反馈「怎么没看到图」）。
       body: this.body,
       status,
-      target: { replyToMessageId, chatId },
+      target: { replyToMessageId, chatId, replyInThread },
       transport: this.transport,
     });
   }
