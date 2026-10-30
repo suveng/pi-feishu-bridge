@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -11,7 +12,16 @@ import { FeishuBridgeRuntime } from "../../feishu/bridge-runtime.ts";
 import { FeishuBridgeStore } from "../../feishu/bridge-store.ts";
 import { FeishuDelivery } from "../../feishu/delivery.ts";
 import { acquireGatewayLock, gatewayLockPath, readAllGatewayOwnerPids, readGatewayOwner, type GatewayLockHandle, type GatewayOwner } from "../../feishu/gateway-lock.ts";
-import { isForeignWorkspace, readOwnerWorkspace, writeOwnerWorkspace } from "../../feishu/instance.ts";
+import { isForeignWorkspace, readOwnerWorkspace, resolveInstanceDir, writeOwnerWorkspace } from "../../feishu/instance.ts";
+import {
+  DEFAULT_INSTANCE_NAME,
+  instanceDirForName,
+  instanceConfigPath,
+  instanceNameFromDir,
+  isValidInstanceName,
+  listInstances,
+  readInstanceConfig,
+} from "../../feishu/instances.ts";
 import { FeishuMessageHandler } from "../../feishu/message-handler.ts";
 import { runSetup, uiConfirm } from "./setup.ts";
 import {
@@ -214,7 +224,37 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     return withBuildTag(`${brand}: ${labels[status]}`);
   }
 
+  /** 单实例一行状态：本进程连接优先，其次网关锁（= detached daemon 的心跳）。 */
+  function instanceStateBrief(dir: string, cfg: ReturnType<typeof readInstanceConfig>) {
+    if (!cfg) return { icon: "○", text: "未配置" };
+    if (dir === currentInstanceDir() && transport?.isRunning()) return { icon: "●", text: "已连接(进程内)" };
+    const owner = readGatewayOwner(cfg.appId);
+    if (!owner) return { icon: "○", text: "未运行" };
+    if (owner.status === "connected") return { icon: "●", text: `已连接(daemon ${owner.pid})` };
+    if (owner.status === "starting") return { icon: "◐", text: `启动中(daemon ${owner.pid})` };
+    return { icon: "◌", text: `${owner.status}(daemon ${owner.pid})` };
+  }
+
+  /** 多实例时状态栏改成一行概览；只有一个实例时返回 undefined（沿用单实例文案）。 */
+  function multiInstanceStatusText() {
+    const instances = listInstances(process.cwd()).filter((instance) => instance.configured);
+    if (instances.length < 2) return undefined;
+    const current = currentInstanceDir();
+    const segments = instances.map((instance) => {
+      const name = instanceNameFromDir(process.cwd(), instance.dir) || instance.name;
+      const { icon, text } = instanceStateBrief(instance.dir, readInstanceConfig(instance.dir));
+      return `${icon} ${name}${instance.dir === current ? "*" : ""} ${text}`;
+    });
+    const prefix = foreignWorkspaceOwner ? `(属 ${foreignWorkspaceOwner}) ` : "";
+    return withBuildTag(`${prefix}Feishu: ${segments.join(" | ")}`);
+  }
+
   function refreshStatusFromState() {
+    const multi = multiInstanceStatusText();
+    if (multi) {
+      setStatusText(multi);
+      return;
+    }
     const cfg = loadConfig();
     const brand = cfg?.domain === "lark" ? "Lark" : "Feishu";
     if (!cfg) {
@@ -346,7 +386,9 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
       ctx.ui.notify(withBuildTag(`飞书连接已在后台运行。\n${formatOwner(result.owner)}`), "info");
       return;
     }
-    ctx.ui.notify(withBuildTag(`飞书连接已启动。\nGateway pid=${result.pid}\nLog: ${DAEMON_LOG_PATH}`), "info");
+    const where = "dir" in result && result.dir ? `\n实例目录: ${result.dir}` : "";
+    const log = "logPath" in result && result.logPath ? result.logPath : DAEMON_LOG_PATH;
+    ctx.ui.notify(withBuildTag(`飞书连接已启动。\nGateway pid=${result.pid}${where}\nLog: ${log}`), "info");
   }
 
   // daemon 启动形状来自 feishu/daemon-spec.ts：/restart 的 worker 必须用完全相同的
@@ -359,16 +401,47 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     return daemonCommand(daemonSpecForEntry());
   }
 
-  async function startDaemon(takeover = false) {
+  // ---------- 多实例（一个工作区多个机器人） ----------
+  //
+  // 架构基线不变：一个实例目录 = 一个自建应用 = 一个 daemon（见 feishu/instances.ts 顶部说明）。
+  // 这里只把「启动/停止」从只认当前实例目录，扩到能指定任意实例目录。
+
+  /** 当前进程绑定的实例目录（TUI 未设 FEISHU_DATA_DIR 时 = `<工作区>/.pi/feishu`）。 */
+  function currentInstanceDir() {
+    return resolveInstanceDir();
+  }
+
+  /**
+   * 实例名 → 实例目录。
+   * 未给名字 / `default` → 当前实例目录；名字非法 → `undefined`。
+   */
+  function dirForInstanceName(name?: string): string | undefined {
+    const trimmed = (name || "").trim();
+    if (!trimmed || trimmed === DEFAULT_INSTANCE_NAME) return currentInstanceDir();
+    if (!isValidInstanceName(trimmed)) return undefined;
+    return instanceDirForName(process.cwd(), trimmed);
+  }
+
+  function instanceDaemonLogPath(dir: string) {
+    return dir === currentInstanceDir() ? DAEMON_LOG_PATH : join(dir, "daemon.log");
+  }
+
+  async function startDaemon(takeover = false, dir: string = currentInstanceDir()) {
     return withDaemonSpawnLock(async () => {
-      const cfg = loadConfig();
-      if (!cfg) throw new Error(`Missing config. Run /feishu setup first. 配置不存在，请先运行 /feishu setup。`);
-      let owner = currentGatewayOwner();
+      const cfg = readInstanceConfig(dir);
+      if (!cfg) {
+        throw new Error(
+          `实例目录缺少配置：${dir}\n先用 /feishu bots add <名字> 新建一个机器人，或 /feishu setup 配当前实例。`,
+        );
+      }
+      const sameAsCurrent = dir === currentInstanceDir();
+      let owner = readGatewayOwner(cfg.appId);
       if (owner && owner.pid !== process.pid && !takeover) {
         return { status: "busy" as const, owner };
       }
 
-      if (owner?.pid === process.pid || transport?.isRunning()) {
+      // 本进程自己就是这个实例的持有者（daemon 里跑 /feishu start）时，先停掉自己的连接。
+      if (sameAsCurrent && (owner?.pid === process.pid || transport?.isRunning())) {
         await stop();
       } else if (owner && takeover) {
         try { process.kill(owner.pid, "SIGTERM"); } catch {}
@@ -377,14 +450,19 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
 
       // Re-check while holding the spawn lock. Another TUI may have started it
       // while this process was waiting for the lock.
-      owner = currentGatewayOwner();
+      owner = readGatewayOwner(cfg.appId);
       if (owner && owner.pid !== process.pid && !takeover) {
         return { status: "busy" as const, owner };
       }
 
       reapDetachedDaemonProcesses({ keepPids: [process.pid], extensionPath: extensionEntry });
-      ensureRoot();
-      const logFd = openSync(DAEMON_LOG_PATH, "a");
+      // 当前实例沿用 ensureRoot()（含旧全局数据搬迁）；其它实例只建目录。
+      if (sameAsCurrent) ensureRoot();
+      else mkdirSync(dir, { recursive: true });
+      const logPath = instanceDaemonLogPath(dir);
+      const logFd = openSync(logPath, "a");
+      // FEISHU_DATA_DIR 是 daemon 认实例的唯一依据：必须显式传，不能靠继承（TUI 自己可能没设）。
+      const childEnv = { ...process.env, PI_FEISHU_DAEMON: "1", FEISHU_DATA_DIR: dir };
       let child: ChildProcess;
       if (process.platform === "win32") {
         // Windows 上 spawn("bash", ...) 可能解析到 WSL 的 bash.exe（而非 Git Bash），
@@ -399,7 +477,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
         child = spawn("node", [piCliEntry, ...args], {
           detached: true,
           cwd: process.cwd(),
-          env: { ...process.env, PI_FEISHU_DAEMON: "1" },
+          env: childEnv,
           stdio: ["pipe", logFd, logFd],
         });
         // 保持 stdin 打开，等价于 Linux 侧 `tail -f /dev/null |` 的作用，
@@ -409,19 +487,25 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
         child = spawn("bash", ["-lc", daemonCommandForEntry()], {
           detached: true,
           cwd: process.cwd(),
-          env: { ...process.env, PI_FEISHU_DAEMON: "1" },
+          env: childEnv,
           stdio: ["ignore", logFd, logFd],
         });
       }
       child.unref();
 
       await sleep(1500);
-      return { status: "started" as const, pid: child.pid, owner: currentGatewayOwner() };
+      return {
+        status: "started" as const,
+        pid: child.pid,
+        owner: readGatewayOwner(cfg.appId),
+        dir,
+        logPath,
+      };
     });
   }
 
-  async function stopDaemon() {
-    const owner = currentGatewayOwner();
+  async function stopDaemon(dir: string = currentInstanceDir()) {
+    const owner = readGatewayOwner(readInstanceConfig(dir)?.appId);
     if (!owner) {
       reapDetachedDaemonProcesses({ extensionPath: extensionEntry });
       return { status: "none" as const };
@@ -441,21 +525,128 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     }
   }
 
-  async function restartDaemon() {
-    const stopped = await stopDaemon();
+  async function restartDaemon(dir: string = currentInstanceDir()) {
+    const stopped = await stopDaemon(dir);
     if (stopped.status === "error") return { status: "error" as const, stopped };
-    const started = await startDaemon(true);
+    const started = await startDaemon(true, dir);
     return { status: "restarted" as const, stopped, started };
   }
 
+  /** `/feishu bots` 的列表视图：名字、appId、连接状态（看网关锁）、目录。 */
+  function describeInstances() {
+    const current = currentInstanceDir();
+    const instances = listInstances(process.cwd());
+    if (!instances.length) return "还没有任何飞书实例。用 /feishu setup 配第一个，或 /feishu bots add <名字> 加第二个。";
+    const lines = instances.map((instance) => {
+      const marker = instance.dir === current ? "*" : " ";
+      const name = instanceNameFromDir(process.cwd(), instance.dir) || instance.name;
+      if (!instance.configured) return `${marker} ${name}\t未配置\t${instance.dir}`;
+      const owner = readGatewayOwner(instance.appId);
+      const state = owner
+        ? `${owner.status}(pid=${owner.pid}, 心跳 ${owner.heartbeatAt.slice(11, 19)})`
+        : "未运行";
+      const port = instance.webhookPort ? ` port=${instance.webhookPort}` : "";
+      return `${marker} ${name}\t${mask(instance.appId || "")}\t${state}\tautoStart=${instance.autoStart ? "on" : "off"}${port}\t${instance.dir}`;
+    });
+    return [
+      `飞书实例（* = 当前 TUI 绑定的那个）：`,
+      "``name	appId	状态	选项	目录``",
+      ...lines,
+    ].join("\n");
+  }
+
   pi.registerCommand("feishu", {
-    description: "Feishu/Lark: setup, start, stop, restart, status, debug, autostart, reset, tools on|off, progress",
+    description: "Feishu/Lark: setup, start, stop, restart, status, bots, debug, autostart, reset, tools on|off, progress",
     handler: async (args, ctx) => {
       uiRef = ctx.ui as any;
-      const tokens = args.trim().toLowerCase().split(/\s+/, 2);
-      const cmd = tokens[0] || "status";
-      const cmdArg = tokens[1] || "";
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      const cmd = (parts[0] || "status").toLowerCase();
+      const cmdArg = (parts[1] || "").toLowerCase();
+      const cmdArg2 = (parts[2] || "").toLowerCase();
+      /** 解析 `/feishu bots <action> <名字>` 的目标目录；非法名字直接提示并返回 undefined。 */
+      const instanceDirArg = (name: string): string | undefined => {
+        const dir = dirForInstanceName(name);
+        if (!dir) {
+          ctx.ui.notify(
+            `实例名不合法：${name || "(空)"}。只允许小写字母/数字/连字符，不能是 default。`,
+            "error",
+          );
+          return undefined;
+        }
+        return dir;
+      };
       try {
+        if (cmd === "bots" || cmd === "instances") {
+          const action = cmdArg;
+          const name = cmdArg2;
+          if (!action || action === "list") {
+            ctx.ui.notify(describeInstances(), "info");
+            return;
+          }
+          if (action === "add") {
+            if (!name || !isValidInstanceName(name)) {
+              ctx.ui.notify("用法：/feishu bots add <名字>（小写字母/数字/连字符，不能是 default）", "warning");
+              return;
+            }
+            const dir = instanceDirForName(process.cwd(), name);
+            if (readInstanceConfig(dir)) {
+              ctx.ui.notify(`${name} 已经配置过了（${dir}）。要重连用 /feishu bots restart ${name}。`, "warning");
+              return;
+            }
+            const configToStart = await runSetup(ctx, { configPath: instanceConfigPath(dir), dir });
+            if (configToStart) {
+              notifyDaemonStartResult(ctx, await startDaemon(false, dir));
+            }
+            ctx.ui.notify(describeInstances(), "info");
+            return;
+          }
+          if (!name) {
+            ctx.ui.notify(`用法：/feishu bots ${action} <名字>。先 /feishu bots 看有哪些实例。`, "warning");
+            return;
+          }
+          const dir = instanceDirArg(name);
+          if (!dir) return;
+          if (action === "start") {
+            notifyDaemonStartResult(ctx, await startDaemon(false, dir));
+            return;
+          }
+          if (action === "restart") {
+            const result = await restartDaemon(dir);
+            if (result.status === "error") {
+              ctx.ui.notify(`实例 ${name} 重启失败：${String((result.stopped as any)?.error ?? "")}`, "error");
+              return;
+            }
+            notifyDaemonStartResult(ctx, result.started);
+            return;
+          }
+          if (action === "stop") {
+            const result = await stopDaemon(dir);
+            ctx.ui.notify(result.status === "none" ? `实例 ${name} 未在运行。` : `实例 ${name} 已停止。`, "info");
+            return;
+          }
+          if (action === "rm" || action === "remove") {
+            if (dir === currentInstanceDir()) {
+              ctx.ui.notify("默认实例不能删除，用 /feishu reset 清配置。", "warning");
+              return;
+            }
+            const ok = await uiConfirm(
+              ctx,
+              `确认删除实例 ${name}？会停掉它的 daemon 并删除 ${dir}（该机器人的飞书会话映射、去重记录一并没了；pi 会话历史保留）。`,
+              false,
+            );
+            if (!ok) {
+              ctx.ui.notify("已取消。", "info");
+              return;
+            }
+            await stopDaemon(dir);
+            rmSync(dir, { recursive: true, force: true });
+            ctx.ui.notify(`实例 ${name} 已删除。`, "info");
+            ctx.ui.notify(describeInstances(), "info");
+            return;
+          }
+          ctx.ui.notify("用法：/feishu bots [add|start|stop|restart|rm] <名字>", "warning");
+          return;
+        }
         if (cmd === "setup") {
           const configToStart = await runSetup(ctx);
           if (configToStart) {
@@ -526,6 +717,8 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
           const owner = gatewayLock?.owner || currentGatewayOwner();
           ctx.ui.notify(
             [
+              describeInstances(),
+              "",
               `Status: ${lastStatusText || (loadConfig() ? "Feishu: disconnected" : "Feishu: not configured")}`,
               `Gateway owner: ${formatOwner(owner)}`,
               `Config: ${cfg ? `${cfg.domain}, appId=${mask(cfg.appId)}, groupPolicy=${cfg.groupPolicy}, autoStart=${cfg.autoStart !== false}` : "missing"}`,
@@ -630,6 +823,8 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     }
     // 每个新会话默认隐藏配置工具，保持提示词干净；用户可用 /feishu tools on 打开。
     hideFeishuConfigTools(pi);
+    // 多实例时启动就把「有几个机器人、各自 daemon 什么状态」摆出来，省得再去 /feishu status。
+    if (multiInstanceStatusText()) ctx.ui.notify(describeInstances(), "info");
   });
 
   if (bootConfig?.autoStart) {

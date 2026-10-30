@@ -1,4 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { CONFIG_PI_PATH, DEFAULT_CONFIG, ensureRoot, mask, writeJson } from "../../feishu/config.ts";
 import { registerFeishuApp } from "../../feishu/app-register.ts";
 import type { Domain, FeishuConfig, GroupPolicy } from "../../feishu/types.ts";
@@ -31,8 +33,15 @@ export async function uiConfirm(ctx: ExtensionCommandContext, title: string, ini
   return initial;
 }
 
-export async function runSetup(ctx: ExtensionCommandContext) {
-  ensureRoot();
+export async function runSetup(ctx: ExtensionCommandContext, options: { configPath?: string; dir?: string } = {}) {
+  const configPath = options.configPath || CONFIG_PI_PATH;
+  // 当前实例（没有显式目录）沿用 ensureRoot()：包含旧全局数据的搬迁。
+  // 指定了别的实例目录时只建目录 —— 不能拿当前实例的 ensureRoot 去动别的目录。
+  if (!options.dir || options.dir === dirname(CONFIG_PI_PATH)) {
+    ensureRoot();
+  } else {
+    mkdirSync(options.dir, { recursive: true });
+  }
   const mode = await uiSelect(ctx,
     "配置方式 / Setup method",
     [
@@ -84,11 +93,11 @@ export async function runSetup(ctx: ExtensionCommandContext) {
     reactEmoji: DEFAULT_CONFIG.reactEmoji,
     autoStart: true,
   };
-  // 实例目录跟着工作区走，直接写本工作区实例的配置（不存在覆盖别的工作区的问题）。
-  writeJson(CONFIG_PI_PATH, config);
+  // 实例目录跟着工作区走，直接写目标实例的配置（不存在覆盖别的工作区的问题）。
+  writeJson(configPath, config);
 
   ctx.ui.notify(
-    `飞书配置已保存 / Feishu config saved\nPath: ${CONFIG_PI_PATH}\nApp ID: ${mask(appId)}\n群聊策略 / Group policy: ${groupPolicy}`,
+    `飞书配置已保存 / Feishu config saved\nPath: ${configPath}\nApp ID: ${mask(appId)}\n群聊策略 / Group policy: ${groupPolicy}`,
     "info",
   );
 
