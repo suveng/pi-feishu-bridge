@@ -170,16 +170,24 @@ export class PiConversationRuntime implements ConversationRuntime {
     this.loadSettingsDefault();
   }
 
-  /** Read global settings default model for fallback in getSelectedModel. */
-  private loadSettingsDefault() {    try {
-      const settingsPath = join(getAgentDir(), "settings.json");
-      const raw = readFileSync(settingsPath, "utf-8");
-      const settings = JSON.parse(raw);
-      if (settings.defaultProvider && settings.defaultModel) {
-        this.defaultProvider = settings.defaultProvider;
-        this.defaultModelId = settings.defaultModel;
-      }
-    } catch {}
+  /**
+   * Read default model for fallback in getSelectedModel.
+   * 默认链与本地 `pi` 一致：项目 `<cwd>/.pi/settings.json` → agent 全局 settings.json。
+   */
+  private loadSettingsDefault() {
+    for (const settingsPath of [
+      join(this.cwd, ".pi", "settings.json"),
+      join(getAgentDir(), "settings.json"),
+    ]) {
+      try {
+        const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+        if (settings.defaultProvider && settings.defaultModel) {
+          this.defaultProvider = settings.defaultProvider;
+          this.defaultModelId = settings.defaultModel;
+          return;
+        }
+      } catch {}
+    }
   }
 
   async prompt(key: string, userText: string, onReply: (text: string) => Promise<void>, onDelta?: (delta: string) => void) {
