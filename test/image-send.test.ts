@@ -105,6 +105,59 @@ test("TC-BRIDGE-IMG-08 上传报错降级为 undefined，不抛", async () => {
   assert.equal(await uploadImage(client, png), undefined);
 });
 
+test("TC-BRIDGE-IMG-16 上传时交给 SDK 的是 Buffer，不是可读流（EPIPE 根因）", async () => {
+  const { png } = makeWorkspace();
+  let received: any;
+  const client = {
+    im: {
+      image: {
+        create: async (arg: any) => {
+          received = arg.data.image;
+          return { data: { image_key: "k-buffer" } };
+        },
+      },
+    },
+  };
+  assert.equal(await uploadImage(client, png), "k-buffer");
+  assert.equal(Buffer.isBuffer(received), true);
+  assert.equal(typeof received.pipe, "undefined");
+});
+
+test("TC-BRIDGE-IMG-17 网络类错误重试后成功", async () => {
+  const { png } = makeWorkspace();
+  let calls = 0;
+  const client = {
+    im: {
+      image: {
+        create: async () => {
+          calls += 1;
+          if (calls === 1) throw new Error("write EPIPE");
+          return { data: { image_key: "k-retry" } };
+        },
+      },
+    },
+  };
+  assert.equal(await uploadImage(client, png), "k-retry");
+  assert.equal(calls, 2);
+});
+
+test("TC-BRIDGE-IMG-18 权限类错误不重试，直接降级", async () => {
+  const { png } = makeWorkspace();
+  let calls = 0;
+  const client = {
+    im: {
+      image: {
+        create: async () => {
+          calls += 1;
+          throw new Error("99991672 no permission");
+        },
+      },
+    },
+  };
+  assert.equal(await uploadImage(client, png), undefined);
+  assert.equal(calls, 1);
+});
+
 test("TC-BRIDGE-IMG-09 有回复锚点时用 reply 发图", async () => {
   const { png } = makeWorkspace();
   const calls: any[] = [];

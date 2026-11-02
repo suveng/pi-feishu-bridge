@@ -9,7 +9,7 @@
  *   2. POST /open-apis/im/v1/messages，msg_type=image，content={"image_key":...}
  * 需要的应用权限：「上传图片」（im:resource）。
  */
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, isAbsolute, resolve } from "node:path";
 import { debugLog } from "./debug.ts";
 
@@ -91,25 +91,58 @@ export function stripLocalImageMarkdown(text: string): string {
   );
 }
 
-/** 上传一张本地图片，返回 image_key（失败返回 undefined，不抛） */
+/** 上传失败时的重试次数与退避基数（只对网络类错误重试） */
+const UPLOAD_MAX_ATTEMPTS = 3;
+const UPLOAD_RETRY_DELAY_MS = 300;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 网络抖动才值得重试；权限不足 / 参数错这类重试也没用，直接放弃。
+ */
+function isRetryableUploadError(message: string): boolean {
+  return /EPIPE|ECONNRESET|ETIMEDOUT|socket hang up|timeout|other side closed/i.test(message);
+}
+
+/**
+ * 上传一张本地图片，返回 image_key（失败返回 undefined，不抛）。
+ *
+ * **必须整块读成 Buffer 再交 SDK**：用 `createReadStream` 时网络一抖动 SDK 写流就抛
+ * `write EPIPE`，图被静默丢弃、用户侧只看到「没收到图」（2026-11-02 实测：同一份凭据用
+ * Buffer 直传图片接口 `code=0` 成功，而桥接这条路径日志里只有 `feishu.image.upload.error`）。
+ */
 export async function uploadImage(client: any, filePath: string): Promise<string | undefined> {
+  let buffer: Buffer;
   try {
-    const res = await client.im.image.create({
-      data: { image_type: "message", image: createReadStream(filePath) },
-    });
-    const imageKey = res?.data?.image_key ?? res?.image_key;
-    if (!imageKey) {
-      debugLog("feishu.image.upload.empty_key", { filePath });
-      return undefined;
-    }
-    return String(imageKey);
+    buffer = readFileSync(filePath);
   } catch (error) {
-    debugLog("feishu.image.upload.error", {
+    debugLog("feishu.image.read.error", {
       filePath,
       error: error instanceof Error ? error.message : String(error),
     });
     return undefined;
   }
+  for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const res = await client.im.image.create({
+        data: { image_type: "message", image: buffer },
+      });
+      const imageKey = res?.data?.image_key ?? res?.image_key;
+      if (!imageKey) {
+        debugLog("feishu.image.upload.empty_key", { filePath, attempt });
+        return undefined;
+      }
+      return String(imageKey);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      debugLog("feishu.image.upload.error", { filePath, attempt, error: message });
+      if (attempt >= UPLOAD_MAX_ATTEMPTS || !isRetryableUploadError(message)) return undefined;
+      await sleep(UPLOAD_RETRY_DELAY_MS * attempt);
+    }
+  }
+  return undefined;
 }
 
 /**
