@@ -201,7 +201,10 @@ export type LocalImageTransport = {
 /**
  * 把正文里的本地图片挨张发出去，返回实际发出的张数。
  *
- * 规则：只在 status=done 时发（失败/中断的轮次不发）；失败只在日志里留痕。
+ * 规则：`done` 与 `stopped` 都发，只有 `failed` 不发。
+ * - `stopped` 必须发：中断时模型已经把 `![](路径)` 写进正文，用户看得到文字却看不到图，
+ *   会被当成「图没发」——2026-11-06 中断事故里 5 张设计稿全丢，用户连续追问两次。
+ * - `failed` 不发但落 `local_image_dropped` 日志（带 count/paths），丢失可查。
  * 抽成 free function 是为了别把 reply-card.ts 顶过 500 行硬上限。
  */
 export async function flushLocalImages(input: {
@@ -211,7 +214,19 @@ export async function flushLocalImages(input: {
   transport: LocalImageTransport;
   cwd?: string;
 }): Promise<number> {
-  if (input.status !== "done") return 0;
+  if (input.status === "failed") {
+    // 失败轮次的正文不作数，图不发；但必须留一条可查记录，
+    // 否则「正文里明明写了图、结果一张没发」只能靠猜（2026-11-06 断线事故复盘）。
+    const dropped = extractLocalImages(input.body, input.cwd ?? process.cwd());
+    if (dropped.length > 0) {
+      debugLog("feishu.reply_card.local_image_dropped", {
+        status: input.status,
+        count: dropped.length,
+        paths: dropped.map((ref) => ref.path),
+      });
+    }
+    return 0;
+  }
   const refs = extractLocalImages(input.body, input.cwd ?? process.cwd());
   if (refs.length === 0) return 0;
   const picked = refs.slice(0, MAX_LOCAL_IMAGES_PER_TURN);

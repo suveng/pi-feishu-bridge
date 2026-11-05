@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   extractLocalImages,
+  flushLocalImages,
   sendLocalImage,
   stripLocalImageMarkdown,
   uploadImage,
@@ -318,4 +319,44 @@ test("TC-BRIDGE-IMG-15 回复收尾发图用的是原文（卡片正文才 strip
   await card.completeWithAnswer(`登录页动效见下：![登录页动效](${png})`);
   assert.deepEqual(sent, [png], `应把 ${png} 发出去，实际发出 ${sent.length} 张`);
   assert.ok(dir);
+});
+
+test("TC-BRIDGE-IMG-19 被新消息打断（stopped）也要把正文里的图发出去", async () => {
+  // 2026-11-06 事故：一条回复里写了 5 张设计稿的 markdown，紧接着弹选择题；
+  // 用户回话触发 interrupted_by_new_message → 卡片 status=stopped →
+  // 旧实现 `if (status !== "done") return 0` 直接吞掉，5 张图一张没发。
+  // 正文里已经写出来的图就是用户该看到的内容，中断不该改变这件事。
+  const { png } = makeWorkspace();
+  const sent: string[] = [];
+  const got = await flushLocalImages({
+    body: `稿1：![稿1](${png})`,
+    status: "stopped",
+    target: { replyToMessageId: "om_parent", replyInThread: true },
+    transport: {
+      replyLocalImage: async (_id: string, p: string) => {
+        sent.push(p);
+        return "om_fake_image";
+      },
+    },
+  });
+  assert.equal(got, 1, `stopped 轮次应发出 1 张，实际 ${got} 张`);
+  assert.deepEqual(sent, [png]);
+});
+
+test("TC-BRIDGE-IMG-20 失败轮次不发图", async () => {
+  const { png } = makeWorkspace();
+  const sent: string[] = [];
+  const got = await flushLocalImages({
+    body: `稿1：![稿1](${png})`,
+    status: "failed",
+    target: { replyToMessageId: "om_parent" },
+    transport: {
+      replyLocalImage: async (_id: string, p: string) => {
+        sent.push(p);
+        return "om_fake_image";
+      },
+    },
+  });
+  assert.equal(got, 0);
+  assert.deepEqual(sent, []);
 });
