@@ -247,7 +247,7 @@ Actions 页面 → `publish` → Run workflow（`workflow_dispatch`），条件�
    四项逐字匹配，改工作流文件名就必须同步改这里，否则发布报 `E404 ... could not be found or you do not have permission`。
 3. **仓库内 `.npmrc` 必须固定官方源**（`registry=https://registry.npmjs.org/`）：本机全局 `.npmrc` 用的是 npmmirror，
    一旦 `package-lock.json` 里出现 `registry.npmmirror.com` 的 `resolved` 地址，CI 的 `npm ci` 会直接失败：
-   `npm error code EALLOWREMOVE` / `Fetching packages of type "remote" have been disabled`。
+   `npm error code EALLOWREMOTE` / `Fetching packages of type "remote" have been disabled`。
    遇到时的修法：删掉 `package-lock.json` → `npm install --package-lock-only --registry=https://registry.npmjs.org` 重新生成。
 
 ### npm 作用域说明
