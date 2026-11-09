@@ -6,7 +6,7 @@ name: publish
 #
 # 鉴权走 npm Trusted Publisher（OIDC），仓库里不放任何 NPM_TOKEN。
 # 前置条件（在 npmjs.com 网页配置一次，改包名/仓库/文件名都要重配）：
-#   https://www.npmjs.com/package/@suveng/pi-feishu-bridge/access
+#   https://www.npmjs.com/package/@suwenguang/pi-feishu-bridge/access
 #     Publisher = GitHub Actions
 #     Organization or user = suveng
 #     Repository           = pi-feishu-bridge

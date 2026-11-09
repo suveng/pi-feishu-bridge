@@ -21,10 +21,10 @@
 #### 1. 安装
 
 ```bash
-pi install npm:@suveng/pi-feishu-bridge
+pi install npm:@suwenguang/pi-feishu-bridge
 ```
 
-> npm 包名是 `@suveng/pi-feishu-bridge`（仓库名 `pi-feishu-bridge`），发布由 GitHub Actions 走 OIDC 信任发布，不用 token。
+> npm 包名是 `@suwenguang/pi-feishu-bridge`（仓库名 `pi-feishu-bridge`），发布由 GitHub Actions 走 OIDC 信任发布，不用 token。
 > 历史上 npm 上的 `ax-feishu-bridge` 是上游原作者（AX1202）的包，本仓是它的分支，不含那份的代码更新。
 
 也可以从 Git 安装：
