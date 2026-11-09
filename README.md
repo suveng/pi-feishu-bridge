@@ -209,3 +209,47 @@ cd ~/work/b && pi     # 工作区 B：直接用（各自机器人凭证写在各
 **两个工作区的机器人互相抢连接 / 消息落错工作区？** 看是不是两个实例用了同一个 `appId` —— 必须一个工作区一个自建应用。只有在显式设了 `FEISHU_DATA_DIR`、把两个工作区指到同一实例目录时才会撞车，此时「裸开保护」会拒绝自动启动并标注「连接属于其他工作区」。
 
 **能开机自启动吗？** 暂未实现。目前需要电脑开机后手动启动一次 Pi agent，之后即可关闭前台，在飞书/Lark 里继续对话。
+
+## 发布（维护者）
+
+npm 包名 `@suwenguang/pi-feishu-bridge`，发布由 GitHub Actions 走 **OIDC 信任发布**，仓库里不放任何 token。
+tag 一推就自动发，不需要任何人扫码。
+
+### 发一个版本
+
+```bash
+cd .pi/git/gitee.com/suveng/pi-feishu-bridge
+npm version patch --no-git-tag-version   # 或 minor / 手改 package.json
+git commit -am "chore(发布): 0.6.3"
+git tag v0.6.3
+git push origin main v0.6.3              # gitee
+git push github main v0.6.3              # GitHub（触发 Actions）
+```
+
+成功征兆（三步都要看到，缺一条就是没发成）：
+
+1. https://github.com/suveng/pi-feishu-bridge/actions 里 `publish` 运行变绿，日志末尾有 `+ @suwenguang/pi-feishu-bridge@0.6.3`
+2. 日志里出现 `Provenance statement published to transparency log`（OIDC 签名成功）
+3. 等 1-2 分钟后 `npm view @suwenguang/pi-feishu-bridge version --registry=https://registry.npmjs.org` 返回新版本号
+
+> 发布成功后 registry 还要 1-2 分钟才可见，期间 `npm view` 报 404 属正常（新包风控），不要重发。
+
+### 也可以手动触发
+
+Actions 页面 → `publish` → Run workflow（`workflow_dispatch`），条件同样是 `package.json` 的版本号还没发过。
+
+### 前置配置（只在首次或改包名/改仓库时做一次）
+
+1. **首次发布必须手动**：npm 不允许给「还不存在的包」预配 OIDC，第一个版本只能用 `npm login` + 2FA 手动 `npm publish --access public`。
+   非交互环境（脚本 / Agent）下 npm 会把 2FA 链接打码成 `***`，要用 pty 才能拿到真链接：`script -q /dev/null npm publish --access public`。
+2. **Trusted Publisher**：https://www.npmjs.com/package/@suwenguang/pi-feishu-bridge/access
+   —— Publisher `GitHub Actions` / Organization `suveng` / Repository `pi-feishu-bridge` / Workflow filename `publish.yml` / Environment 留空。
+   四项逐字匹配，改工作流文件名就必须同步改这里，否则发布报 `E404 ... could not be found or you do not have permission`。
+3. **仓库内 `.npmrc` 必须固定官方源**（`registry=https://registry.npmjs.org/`）：本机全局 `.npmrc` 用的是 npmmirror，
+   一旦 `package-lock.json` 里出现 `registry.npmmirror.com` 的 `resolved` 地址，CI 的 `npm ci` 会直接失败：
+   `npm error code EALLOWREMOVE` / `Fetching packages of type "remote" have been disabled`。
+   遇到时的修法：删掉 `package-lock.json` → `npm install --package-lock-only --registry=https://registry.npmjs.org` 重新生成。
+
+### npm 作用域说明
+
+本账号 npm 用户名是 `suwenguang`，`@suveng` 作用域属于另一个账号（用户 `suveng`），本项目无法使用。
