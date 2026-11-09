@@ -1,0 +1,56 @@
+name: publish
+
+# 触发方式：
+#   1) 推一个 v* 标签（推荐）：git tag v0.6.2 && git push origin v0.6.2 && git push github v0.6.2
+#   2) 或在 Actions 页面手动 Run workflow（workflow_dispatch）
+#
+# 鉴权走 npm Trusted Publisher（OIDC），仓库里不放任何 NPM_TOKEN。
+# 前置条件（在 npmjs.com 网页配置一次，改包名/仓库/文件名都要重配）：
+#   https://www.npmjs.com/package/@suveng/pi-feishu-bridge/access
+#     Publisher = GitHub Actions
+#     Organization or user = suveng
+#     Repository           = pi-feishu-bridge
+#     Workflow filename    = publish.yml   ← 必须与 .github/workflows/ 下的文件名逐字一致
+#     Environment          = （留空）
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC 换 npm 发布令牌的唯一凭据，缺了会 403
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # npm 的 OIDC 发布要求 npm >= 11.5.1，Node 24 自带的可能不够，先升级
+      - name: 升级 npm
+        run: npm install -g npm@latest && npm --version
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run check
+
+      - name: 单测
+        run: npm test
+
+      - name: 发布到 npm（provenance 由 OIDC 签发）
+        run: npm publish --provenance --access public

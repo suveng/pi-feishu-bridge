@@ -1,5 +1,5 @@
 {
-  "name": "ax-feishu-bridge",
+  "name": "@suveng/pi-feishu-bridge",
   "version": "0.6.1",
   "description": "Feishu/Lark bridge for the Pi coding agent — chat with Pi from Feishu or Lark",
   "type": "module",
@@ -15,16 +15,17 @@
     "lark",
     "extension"
   ],
-  "homepage": "https://gitee.com/suveng/pi-feishu-bridge#readme",
+  "homepage": "https://github.com/suveng/pi-feishu-bridge#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://gitee.com/suveng/pi-feishu-bridge.git"
+    "url": "git+https://github.com/suveng/pi-feishu-bridge.git"
   },
   "bugs": {
-    "url": "https://gitee.com/suveng/pi-feishu-bridge/issues"
+    "url": "https://github.com/suveng/pi-feishu-bridge/issues"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.68.0",
