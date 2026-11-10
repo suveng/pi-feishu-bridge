@@ -75,15 +75,56 @@ function listProcesses() {
     .map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), command: m[3] }));
 }
 
-/** 从启动壳 pid 认领它下面那两个孩子：tail（喂 stdin）与 pi 真身。 */
+/**
+ * 启动链的层数随平台/容器变：macOS 的 bash 把管道两段挂在启动壳的**直接**子进程上，
+ * Linux（GitHub Actions 的 ubuntu-latest）上会再多套一层子 shell，tail / pi 真身就落到孙辈。
+ * 2026-11-10 只认一层时 Linux 上认不出 -> lock 里写进 undefined -> 回收器 keep 集合为空 ->
+ * 连「有主」的 daemon 一起被杀，CI 报「探针应认出别的实例的 tail/真身」。故按后代找，不再只认一层。
+ */
+function childrenMap() {
+  const map = new Map();
+  for (const proc of listProcesses()) {
+    const arr = map.get(proc.ppid) || [];
+    arr.push(proc);
+    map.set(proc.ppid, arr);
+  }
+  return map;
+}
+
+/** 广度优先取后代（默认最多四层，足够覆盖 启动壳 -> 子 shell -> 管道两段）。 */
+function descendantsOf(rootPid, maxDepth = 4) {
+  const byParent = childrenMap();
+  const out = [];
+  let level = [rootPid];
+  for (let depth = 0; depth < maxDepth && level.length; depth += 1) {
+    const next = [];
+    for (const pid of level) {
+      for (const kid of byParent.get(pid) || []) {
+        out.push(kid);
+        next.push(kid.pid);
+      }
+    }
+    level = next;
+  }
+  return out;
+}
+
+/** 从启动壳 pid 认领它下面那两个进程：tail（喂 stdin）与 pi 真身（按后代找，见上）。 */
 function shapeOf(wrapperPid) {
-  const kids = listProcesses().filter((proc) => proc.ppid === wrapperPid);
+  const kids = descendantsOf(wrapperPid);
   return {
     wrapper: wrapperPid,
     tail: kids.find((proc) => proc.command.includes("tail -f /dev/null"))?.pid,
     real: kids.find((proc) => proc.command.includes("fake-pi"))?.pid,
   };
 }
+
+/** 认不出时把「启动壳下面到底有什么」写进断言消息：CI 红一次就能看清形状，不必再猜平台差异。 */
+const treeOf = (rootPid) => descendantsOf(rootPid).map((proc) => ({
+  pid: proc.pid,
+  ppid: proc.ppid,
+  command: proc.command.slice(0, 120),
+}));
 
 const report = (s) => ({ wrapper: alive(s.wrapper), tail: alive(s.tail), real: alive(s.real) });
 
@@ -112,13 +153,13 @@ const cleanup = (s) => {
   }
 };
 
-/** 等 launcher 把启动壳 fork 出来（拿它的 pid 才能继续认 tail / 真身）。 */
+/** 等 launcher 把启动壳 fork 出来（拿它的 pid 才能继续认 tail / 真身）。同样按后代找，兼容多套一层的平台。 */
 async function waitForChild(parentPid, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
-  let child = listProcesses().find((proc) => proc.ppid === parentPid)?.pid;
+  let child = descendantsOf(parentPid)[0]?.pid;
   while (!child && Date.now() < deadline) {
     await sleep(100);
-    child = listProcesses().find((proc) => proc.ppid === parentPid)?.pid;
+    child = descendantsOf(parentPid)[0]?.pid;
   }
   return child;
 }
@@ -161,6 +202,10 @@ async function waitForChild(parentPid, timeoutMs = 8000) {
     owned: { launcher: alive(ownedLauncher.pid), launcherPid: ownedLauncher.pid, launcherIsRoot: launcherIsRootBefore, ...owned, ...report(owned) },
     orphan: { ...orphan, ...report(orphan) },
     foreign: { ...foreign, ...report(foreign) },
+    // 认不出形状时的唯一证据来源：启动壳下面实际挂了哪些进程（含命令行为前 120 字）
+    ownedTree: treeOf(ownedWrapperPid),
+    orphanTree: treeOf(orphanWrapper.pid),
+    foreignTree: treeOf(foreignWrapper.pid),
   }));
 
   cleanup(owned);
@@ -192,7 +237,7 @@ test("多开：被网关锁认领的 daemon（含启动壳与 tail）不被回�
     assert.ok(out.locksPath.startsWith(home), `锁文件应在隔离目录，实际 ${out.locksPath}`);
 
     // 探针自身要先认出三进程结构，否则下面的断言等于没测
-    assert.ok(out.owned.real && out.owned.tail, `探针应认出别的实例的 tail/真身：${JSON.stringify(out.owned)}`);
+    assert.ok(out.owned.real && out.owned.tail, `探针应认出别的实例的 tail/真身：${JSON.stringify(out.owned)}；启动壳下实际进程=${JSON.stringify(out.ownedTree)}`);
 
     assert.equal(out.owned.real, true, "被网关锁认领的 daemon 真身（另一个实例）不该被杀");
     assert.equal(out.owned.tail, true, "它的 tail 不该被杀（否则那个 daemon 的 stdin 会 EOF）");
