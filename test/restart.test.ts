@@ -257,8 +257,9 @@ test("TC-RESTART-11 票据里的 args 与 daemon-spec 完全一致（worker 靠�
   const { daemonSpec, daemonCommand } = await import("../src/feishu/daemon-spec.ts");
   const spec = daemonSpec("/tmp/feishu/index.ts");
   assert.deepEqual(spec.args.slice(0, 2), ["--mode", "rpc"]);
+  // 2026-11-13：daemon 与 TUI 等同，不再关扩展 / 技能 / 上下文 / 内置工具
   for (const flag of ["--no-extensions", "--no-skills", "--no-builtin-tools"]) {
-    assert.ok(spec.args.includes(flag), `缺少 ${flag}`);
+    assert.ok(!spec.args.includes(flag), `不该再带 ${flag}`);
   }
   assert.equal(spec.args[spec.args.length - 2], "-e");
   const command = daemonCommand(spec);

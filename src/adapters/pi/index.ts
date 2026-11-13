@@ -987,14 +987,17 @@ function listProcesses() {
 }
 
 function looksLikeFeishuDaemon(command: string, extensionPath: string) {
-  // 启动命令经 quoteShell 处理，每个参数单独加引号（'--mode' 'rpc' '--no-extensions'），
+  // 启动命令经 quoteShell 处理，每个参数单独加引号（'--mode' 'rpc'），
   // 直接匹配 "--mode rpc" 永远失败 —— 那样残留的 daemon 空壳（bash + tail 喂 stdin）
   // 永远不会被 reap 掉。所以先去引号再匹配。
+  //
+  // 2026-11-13 起 daemon 不再带 --no-* 开关（与 TUI 等同），判据改为三件套：
+  // rpc 模式 + 给 stdin 续命的 `tail -f /dev/null` + `-e` 紧跟本实例入口。
+  // 只「引用了启动命令」的脚本 / heredoc 缺那只 tail，仍然认不出来。
   const normalized = command.replace(/'/g, "");
-  const hasDaemonFlags = normalized.includes("--mode rpc")
-    && normalized.includes("--no-extensions")
-    && normalized.includes("--no-builtin-tools");
-  if (!hasDaemonFlags) return false;
+  const hasDaemonShape = normalized.includes("--mode rpc")
+    && normalized.includes("tail -f /dev/null");
+  if (!hasDaemonShape) return false;
   if (!extensionPath) return false;
   // 入口路径必须**紧跟在 `-e` 后面**（daemon 的启动形状），而不是「命令行里提到过这个路径」：
   // 否则一段只是引用了启动命令的脚本 / heredoc（测试探针、重启脚本）也会被当成 daemon 回收。

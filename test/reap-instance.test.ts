@@ -43,7 +43,7 @@ const alive = (pid) => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
 
-// 生产形状：bash -lc 'tail -f /dev/null | exec pi --mode rpc --no-extensions ... -e .../feishu/index.ts'
+// 生产形状：bash -lc 'tail -f /dev/null | exec pi --mode rpc -e .../feishu/index.ts'（2026-11-13 起不再带 --no-*）
 const OWN_EXT = "/tmp/fake/.pi/extensions/feishu/index.ts";
 // 别的实例（另一个工作区）的入口：本实例的回收不该看它一眼
 const FOREIGN_EXT = "/tmp/fake-other/.pi/extensions/feishu/index.ts";
@@ -51,7 +51,7 @@ const FOREIGN_EXT = "/tmp/fake-other/.pi/extensions/feishu/index.ts";
 const LAUNCH = (ext) => [
   "tail -f /dev/null",
   "| exec bash -c 'while :; do sleep 1; done' 'fake-pi'",
-  "'--mode' 'rpc' '--no-extensions' '--no-builtin-tools'",
+  "'--mode' 'rpc'",
   "'-e' '" + ext + "'",
 ].join(" ");
 
@@ -128,13 +128,13 @@ const treeOf = (rootPid) => descendantsOf(rootPid).map((proc) => ({
 
 const report = (s) => ({ wrapper: alive(s.wrapper), tail: alive(s.tail), real: alive(s.real) });
 
-/** 复现生产判据：命令行（去引号）里同时出现三个 flag 且 -e 与本实例入口紧邻。 */
+/** 复现生产判据：命令行（去引号）里出现 rpc + 喂 stdin 的 tail + 与本实例入口紧邻的 -e。 */
 function looksLikeRoot(pid, ext) {
   const proc = listProcesses().find((p) => p.pid === pid);
   if (!proc) return false;
   const normalized = proc.command.replace(/'/g, "");
-  return normalized.includes("--mode rpc") && normalized.includes("--no-extensions")
-    && normalized.includes("--no-builtin-tools") && normalized.includes("-e " + ext);
+  return normalized.includes("--mode rpc") && normalized.includes("tail -f /dev/null")
+    && normalized.includes("-e " + ext);
 }
 
 /** 等启动壳把两个孩子（tail + 真身）都拉起来：strip-types 下固定 600ms 等待不够稳，会漏认。 */

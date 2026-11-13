@@ -20,14 +20,12 @@ export function quoteShell(value: string): string {
 
 export function daemonSpec(extensionPath: string): DaemonSpec {
   const piBin = process.env.PI_BIN || "pi";
+  // 2026-11-13 用户口径：「飞书进程应该与 pi 的 TUI 等同」。
+  // 以前这里是 rpc + 六个 --no-*（关扩展 / 技能 / 提示模板 / 主题 / 上下文文件 / 内置工具），
+  // 结果桥接侧与 TUI 能力面不一致：拿不到 skills、AGENTS.md 注入变少、内置工具也少。
+  // 现在只保留 rpc 协议本身与显式 -e（显式入口不依赖扩展自动发现，settings 写坏也起得来）。
   const args = [
     "--mode", "rpc",
-    "--no-extensions",
-    "--no-skills",
-    "--no-prompt-templates",
-    "--no-themes",
-    "--no-context-files",
-    "--no-builtin-tools",
     "-e", extensionPath,
   ];
   return { extensionPath, piBin, args };
