@@ -213,7 +213,8 @@ cd ~/work/b && pi     # 工作区 B：直接用（各自机器人凭证写在各
 同作用域内重复加载先到先得。让位是静默的，只在 `debug.pi.log` 留一条
 `feishu.extension.copy_deferred`（含 `scope` / `reason` / `activeEntry`），生效那份记
 `feishu.extension.copy_active`。判定与加载顺序无关，靠磁盘上的 `<cwd>/.pi/settings.json` 声明
-与两边 `package.json` 版本比较得出。
+与两边 `package.json` 版本比较得出。例外是 daemon：它用 `-e <入口>` 显式加载、只加载列表里的那份，
+此时按 `argv` 顺序判定（`reason: explicit-single` / `explicit-order`），不会让位给一份根本没加载的副本。
 
 **飞书一直连不上，`daemon.log` 里反复出现 `[feishu] daemon found existing owner, exiting`？** 先确认插件至少 0.6.7：老版本在同一 Pi 进程里加载两份桥接扩展时，会各 spawn 一个 daemon 并互相把对方写的网关锁判成 busy。征兆很固定：`debug.pi.log` 里先 `feishu.gateway.lock_acquired`、约 200ms 后 `feishu.gateway.lock_busy`，且 `ownerPid` 与 `currentPid` 是同一个数；`ps` 里能看到两条 `tail -f /dev/null | exec pi … -e …` 但 `-e` 路径不同。0.6.7 起同 pid 的锁按「复用」而不是「busy」处理，0.6.8 起两份副本按作用域隔离。
 

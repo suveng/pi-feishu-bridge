@@ -7,6 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   electExtensionLeader,
+  explicitExtensionEntries,
   isWorkspaceCopyActive,
   readCopyVersion,
   releaseProcessSlotForTest,
@@ -132,4 +133,76 @@ test("隔离：清位后可以重新占位（用例隔离，避免污染）", ()
 test("磁盘判定：工作区未声明插件时 isWorkspaceCopyActive 为假，版本读取失败不应抛错", () => {
   assert.equal(isWorkspaceCopyActive("/definitely/not/a/repo"), false);
   assert.equal(readCopyVersion("/definitely/not/a/repo/.pi/extensions/feishu/index.ts"), undefined);
+});
+
+test("显式入口：从 argv 里解析 -e / --extension 的值", () => {
+  assert.deepEqual(
+    explicitExtensionEntries([
+      "pi", "--mode", "rpc", "--no-extensions",
+      "-e", "/a/bridge/.pi/extensions/feishu/index.ts",
+      "-e", "/repo/.pi/extensions/slow-tool-log/index.ts",
+      "--extension=/c/bridge/.pi/extensions/feishu/index.ts",
+      "--extension", "-not-a-path",
+    ]),
+    [
+      "/a/bridge/.pi/extensions/feishu/index.ts",
+      "/repo/.pi/extensions/slow-tool-log/index.ts",
+      "/c/bridge/.pi/extensions/feishu/index.ts",
+    ],
+  );
+});
+
+test("显式入口：daemon 只带全局入口时，全局副本必须生效（不再让位给没被加载的工作区副本）", () => {
+  releaseProcessSlotForTest();
+  // 2026-11-21 的真实翻车：daemon 用 -e 全局入口启动、工作区又装了副本，
+  // 若按「工作区优先」判，全局让位而工作区没加载 → 谁都不跑，飞书断线。
+  const shared = {
+    cwd: CWD,
+    argv: ["pi", "--mode", "rpc", "-e", GLOBAL_ENTRY],
+    isWorkspaceCopyActive: () => true,
+    readVersion: versions({ [GLOBAL_ENTRY]: "0.6.8", [WORKSPACE_ENTRY]: "0.6.8" }),
+  };
+  try {
+    const election = electExtensionLeader(GLOBAL_ENTRY, shared);
+    assert.equal(election.leader, true);
+    assert.equal(election.reason, "explicit-single");
+  } finally {
+    releaseProcessSlotForTest();
+  }
+});
+
+test("显式入口：argv 同时列了两份时按顺序取第一份，其余让位", () => {
+  releaseProcessSlotForTest();
+  const both = {
+    cwd: CWD,
+    argv: ["pi", "--mode", "rpc", "-e", WORKSPACE_ENTRY, "-e", GLOBAL_ENTRY],
+    isWorkspaceCopyActive: () => true,
+    readVersion: versions({ [GLOBAL_ENTRY]: "0.6.8", [WORKSPACE_ENTRY]: "0.6.8" }),
+  };
+  try {
+    assert.equal(electExtensionLeader(WORKSPACE_ENTRY, both).leader, true);
+    const deferred = electExtensionLeader(GLOBAL_ENTRY, both);
+    assert.equal(deferred.leader, false);
+    assert.equal(deferred.reason, "explicit-order");
+    assert.equal("activeEntry" in deferred ? deferred.activeEntry : undefined, WORKSPACE_ENTRY);
+  } finally {
+    releaseProcessSlotForTest();
+  }
+});
+
+test("显式入口：argv 里只有别的插件入口时，桥接仍按自身是否在列表里判定", () => {
+  releaseProcessSlotForTest();
+  const other = {
+    cwd: CWD,
+    argv: ["pi", "--mode", "rpc", "-e", "/repo/.pi/extensions/slow-tool-log/index.ts"],
+    isWorkspaceCopyActive: () => true,
+    readVersion: versions({ [GLOBAL_ENTRY]: "0.6.8", [WORKSPACE_ENTRY]: "0.6.8" }),
+  };
+  try {
+    // 桥接不在显式列表里 → 退回包加载模式，工作区副本优先
+    assert.equal(electExtensionLeader(GLOBAL_ENTRY, other).leader, false);
+    assert.equal(electExtensionLeader(WORKSPACE_ENTRY, other).leader, true);
+  } finally {
+    releaseProcessSlotForTest();
+  }
 });

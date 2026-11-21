@@ -25,11 +25,15 @@ export type ExtensionScope = "workspace" | "global";
 type Slot = { entry: string; scope: ExtensionScope; at: string };
 
 export type LeaderElection =
-  | { leader: true; scope: ExtensionScope; reason: "workspace-copy" | "global-only" | "workspace-copy-outdated" }
+  | {
+      leader: true;
+      scope: ExtensionScope;
+      reason: "workspace-copy" | "global-only" | "workspace-copy-outdated" | "explicit-single";
+    }
   | {
       leader: false;
       scope: ExtensionScope;
-      reason: "workspace-copy-preferred" | "already-initialized";
+      reason: "workspace-copy-preferred" | "already-initialized" | "explicit-order";
       /** 本进程实际生效的那份入口（诊断用） */
       activeEntry: string;
     };
@@ -37,6 +41,8 @@ export type LeaderElection =
 export type ElectionOptions = {
   /** 判定用的工作区目录，默认 `process.cwd()` */
   cwd?: string;
+  /** 进程参数，默认真实的 `process.argv`（daemon 用 `-e` 显式加载入口） */
+  argv?: string[];
   now?: Date;
   /** 测试注入：工作区是否声明并装有本插件（默认读磁盘） */
   isWorkspaceCopyActive?: (cwd: string) => boolean;
@@ -93,6 +99,28 @@ export function isWorkspaceCopyActive(cwd: string = process.cwd()): boolean {
   }
 }
 
+/**
+ * 取 argv 里显式声明的扩展入口（`-e <path>` / `--extension <path>`）。
+ * Pi 的 daemon 模式用 `--no-extensions ... -e <入口>` 启动，此时**只有**列出的入口被加载，
+ * 「工作区还有一份副本」并不会被加载 —— 让位判据必须只看这份列表。
+ */
+export function explicitExtensionEntries(argv: string[] = process.argv): string[] {
+  const entries: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "-e" || arg === "--extension" || arg === "--extensions") {
+      const next = argv[index + 1];
+      if (next && !next.startsWith("-")) {
+        entries.push(resolve(next));
+        index += 1;
+      }
+      continue;
+    }
+    if (arg.startsWith("--extension=")) entries.push(resolve(arg.slice("--extension=".length)));
+  }
+  return entries;
+}
+
 /** 语义化版本比较：返回负数/0/正数；解析不了的版本按 0 处理。 */
 function compareVersions(left: string | undefined, right: string | undefined): number {
   const parse = (value: string | undefined): number[] =>
@@ -122,6 +150,23 @@ export function electExtensionLeader(entry: string, options: ElectionOptions = {
   const at = (options.now ?? new Date()).toISOString();
   const slotStore = globalThis as unknown as Record<symbol, unknown>;
   const existing = slotStore[PROCESS_SLOT_KEY] as Slot | undefined;
+
+  // 显式入口模式（daemon）：谁在 argv 里排第一谁生效，其余一律让位。
+  // 这里是 2026-11-21 的真实翻车点：daemon 只带全局入口启动、工作区又装了一份，
+  // 若按「工作区优先」判，全局让位而工作区根本没被加载 → 谁都不跑，飞书断线。
+  const explicitBridges = explicitExtensionEntries(options.argv ?? process.argv)
+    .filter((item) => item.includes(PACKAGE_NAME) && item.endsWith("/.pi/extensions/feishu/index.ts"));
+  if (explicitBridges.length > 0) {
+    const mine = resolve(entry);
+    if (explicitBridges[0] !== mine) {
+      return { leader: false, scope, reason: "explicit-order", activeEntry: explicitBridges[0] };
+    }
+    if (existing && existing.entry !== entry) {
+      return { leader: false, scope, reason: "already-initialized", activeEntry: existing.entry };
+    }
+    slotStore[PROCESS_SLOT_KEY] = { entry, scope, at } satisfies Slot;
+    return { leader: true, scope, reason: "explicit-single" };
+  }
 
   let workspaceCopyOutdated = false;
   if (scope === "global") {
