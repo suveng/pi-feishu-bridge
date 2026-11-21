@@ -33,9 +33,10 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  */
 const PROBE = `
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { reapDetachedDaemonProcesses } from "./src/adapters/pi/index.ts";
+import { readAllGatewayOwnerPids } from "./src/feishu/gateway-lock.ts";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const alive = (pid) => {
@@ -174,6 +175,19 @@ async function waitForChild(parentPid, timeoutMs = 8000) {
   const orphan = await waitForShape(orphanWrapper.pid);
   const foreign = await waitForShape(foreignWrapper.pid);
 
+  // 【临时诊断，CI Linux 专用，出结果后删】
+  console.error("DEBUG_SHAPES " + JSON.stringify({
+    platform: process.platform,
+    node: process.version,
+    launcherPid: ownedLauncher.pid,
+    ownedWrapperPid,
+    owned, orphan, foreign,
+    home: process.env.HOME,
+    gatewayPidsBefore: readAllGatewayOwnerPids(),
+    rootsBefore: listProcesses().filter((p) => looksLikeRoot(p.pid, OWN_EXT)).map((p) => p.pid),
+    ownedTreeBefore: treeOf(ownedWrapperPid).map((p) => ({ pid: p.pid, ppid: p.ppid, cmd: p.command.slice(0, 80) })),
+  }));
+
   const agentDir = join(process.env.HOME, ".pi", "agent");
   const locksPath = join(agentDir, "locks.json");
   mkdirSync(agentDir, { recursive: true });
@@ -196,6 +210,15 @@ async function waitForChild(parentPid, timeoutMs = 8000) {
   const launcherIsRootBefore = looksLikeRoot(ownedLauncher.pid, OWN_EXT);
   reapDetachedDaemonProcesses({ extensionPath: OWN_EXT });
   await sleep(500);
+
+  // 【临时诊断，CI Linux 专用，出结果后删】
+  console.error("DEBUG_AFTER " + JSON.stringify({
+    launcherAlive: alive(ownedLauncher.pid),
+    owned, report: report(owned),
+    gatewayPidsAfter: readAllGatewayOwnerPids(),
+    locksOnDisk: (() => { try { return JSON.parse(readFileSync(locksPath, "utf8")); } catch (e) { return String(e); } })(),
+    ownedTreeAfter: treeOf(ownedWrapperPid).map((p) => ({ pid: p.pid, ppid: p.ppid, cmd: p.command.slice(0, 80) })),
+  }));
 
   console.log(JSON.stringify({
     locksPath,
@@ -237,7 +260,7 @@ test("多开：被网关锁认领的 daemon（含启动壳与 tail）不被回�
     assert.ok(out.locksPath.startsWith(home), `锁文件应在隔离目录，实际 ${out.locksPath}`);
 
     // 探针自身要先认出三进程结构，否则下面的断言等于没测
-    assert.ok(out.owned.real && out.owned.tail, `探针应认出别的实例的 tail/真身：${JSON.stringify(out.owned)}；启动壳下实际进程=${JSON.stringify(out.ownedTree)}`);
+    assert.ok(out.owned.real && out.owned.tail, `探针应认出别的实例的 tail/真身：${JSON.stringify(out.owned)}；启动壳下实际进程=${JSON.stringify(out.ownedTree)}；stderr=${String(result.stderr).slice(-3000)}`);
 
     assert.equal(out.owned.real, true, "被网关锁认领的 daemon 真身（另一个实例）不该被杀");
     assert.equal(out.owned.tail, true, "它的 tail 不该被杀（否则那个 daemon 的 stdin 会 EOF）");
