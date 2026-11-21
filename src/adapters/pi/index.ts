@@ -38,7 +38,7 @@ import { createCardActionHandler } from "../../feishu/card-actions.ts";
 import { LearnApprovalClient } from "../../feishu/learn-approval.ts";
 import { resolveCardTarget } from "../../feishu/reply-card.ts";
 import { installExitFlush } from "../../feishu/live-cards.ts";
-import { claimProcessSlot } from "../../feishu/process-guard.ts";
+import { electExtensionLeader } from "../../feishu/process-guard.ts";
 import { daemonCommand, daemonSpec } from "../../feishu/daemon-spec.ts";
 import { ackRestartIfPending, requestRestart, type RestartTrigger } from "../../feishu/restart.ts";
 import { PiConversationRuntime, handlePiMessageEnd } from "./PiConversationRuntime.ts";
@@ -61,25 +61,22 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     return;
   }
 
-  // 同一进程里只允许一份桥接扩展生效。
-  // 触发场景：插件在全局 `~/.pi/agent/npm` 与工作区 `.pi/npm` 各有一份副本，而两边 settings
-  // 都注册了 `npm:@suwenguang/pi-feishu-bridge` —— Pi 会按两个解析路径各加载一次。
-  // 第二份若继续跑，会再 spawn 一个 daemon、再抢同一把网关锁，把自己刚写的锁判成 busy 后
-  // `process.exit(0)`，导致 autoStart 拉起一个死一个（2026-11-21 事故）。这里直接跳过并留日志。
-  const processSlot = claimProcessSlot(extensionEntry);
-  if (processSlot.status === "duplicate") {
-    debugLog("feishu.extension.duplicate_load_skipped", {
+  // 作用域隔离：插件在全局 `~/.pi/agent/npm` 与工作区 `.pi/npm` 可以各装一份，两份都留着。
+  // Pi 会按两个解析路径各加载一次，本进程只需其中一份初始化：
+  // 工作区副本优先（版本不旧于全局时），全局副本在工作区内自动让位；同作用域内先到先得。
+  // 否则两份会各 spawn 一个 daemon、互相把对方写的网关锁判成 busy 后 `process.exit(0)`，
+  // autoStart 拉起一个死一个（2026-11-21 事故）。让位是静默的，只留 debug 日志。
+  const election = electExtensionLeader(extensionEntry);
+  if (!election.leader) {
+    debugLog("feishu.extension.copy_deferred", {
       entry: extensionEntry,
-      previousEntry: processSlot.previous.entry,
-      previousAt: processSlot.previous.at,
+      scope: election.scope,
+      reason: election.reason,
+      activeEntry: "activeEntry" in election ? election.activeEntry : undefined,
     });
-    console.error(
-      `[feishu] 同一进程内检测到第二份桥接扩展，已跳过加载（本份 ${extensionEntry}，`
-        + `已在用 ${processSlot.previous.entry}）。`
-        + "通常说明该插件在全局 ~/.pi/agent/npm 与工作区 .pi/npm 各装了一份、两处 settings 都注册了，请只保留一处。",
-    );
     return;
   }
+  debugLog("feishu.extension.copy_active", { entry: extensionEntry, scope: election.scope, reason: election.reason });
 
   // 进程被 kill（重启桥接）时，把在册的「回复中」卡片翻成「已停止」并写明原因。
   // 少了这一步，飞书侧会永久停在「正在回复…」（2026-10-14 事故）。
