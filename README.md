@@ -208,6 +208,8 @@ cd ~/work/b && pi     # 工作区 B：直接用（各自机器人凭证写在各
 
 **两个工作区的机器人互相抢连接 / 消息落错工作区？** 看是不是两个实例用了同一个 `appId` —— 必须一个工作区一个自建应用。只有在显式设了 `FEISHU_DATA_DIR`、把两个工作区指到同一实例目录时才会撞车，此时「裸开保护」会拒绝自动启动并标注「连接属于其他工作区」。
 
+**飞书一直连不上，`daemon.log` 里反复出现 `[feishu] daemon found existing owner, exiting`？** 多半是同一个 Pi 进程里加载了**两份**桥接扩展：插件同时存在于全局 `~/.pi/agent/npm` 与某个工作区的 `.pi/npm`，而两处 settings 都注册了 `npm:@suwenguang/pi-feishu-bridge`，Pi 按两个解析路径各加载一次。征兆很固定：`debug.pi.log` 里先 `feishu.gateway.lock_acquired`、约 200ms 后 `feishu.gateway.lock_busy`，且 `ownerPid` 与 `currentPid` 是同一个数；`ps` 里能看到两条 `tail -f /dev/null | exec pi … -e …` 但 `-e` 路径不同。新版对这两点都有护栏：同进程的第二份副本会直接跳过加载并打印 `[feishu] 同一进程内检测到第二份桥接扩展，已跳过加载`，同 pid 的锁按「复用」而不是「busy」处理。但根治仍然是只在一处注册（删掉工作区 `.pi/settings.json` 里那条，或卸载工作区 `.pi/npm` 下的副本）。
+
 **能开机自启动吗？** 暂未实现。目前需要电脑开机后手动启动一次 Pi agent，之后即可关闭前台，在飞书/Lark 里继续对话。
 
 ## 发布（维护者）

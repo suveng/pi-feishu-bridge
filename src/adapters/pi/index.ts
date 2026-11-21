@@ -38,6 +38,7 @@ import { createCardActionHandler } from "../../feishu/card-actions.ts";
 import { LearnApprovalClient } from "../../feishu/learn-approval.ts";
 import { resolveCardTarget } from "../../feishu/reply-card.ts";
 import { installExitFlush } from "../../feishu/live-cards.ts";
+import { claimProcessSlot } from "../../feishu/process-guard.ts";
 import { daemonCommand, daemonSpec } from "../../feishu/daemon-spec.ts";
 import { ackRestartIfPending, requestRestart, type RestartTrigger } from "../../feishu/restart.ts";
 import { PiConversationRuntime, handlePiMessageEnd } from "./PiConversationRuntime.ts";
@@ -57,6 +58,26 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   // Pi 进程使用 Pi 自己的配置/状态/记录文件（默认即 Pi，显式声明便于维护）
   setRuntimeSource(PI_SOURCE);
   if (process.env[CHILD_SESSION_ENV] === "1") {
+    return;
+  }
+
+  // 同一进程里只允许一份桥接扩展生效。
+  // 触发场景：插件在全局 `~/.pi/agent/npm` 与工作区 `.pi/npm` 各有一份副本，而两边 settings
+  // 都注册了 `npm:@suwenguang/pi-feishu-bridge` —— Pi 会按两个解析路径各加载一次。
+  // 第二份若继续跑，会再 spawn 一个 daemon、再抢同一把网关锁，把自己刚写的锁判成 busy 后
+  // `process.exit(0)`，导致 autoStart 拉起一个死一个（2026-11-21 事故）。这里直接跳过并留日志。
+  const processSlot = claimProcessSlot(extensionEntry);
+  if (processSlot.status === "duplicate") {
+    debugLog("feishu.extension.duplicate_load_skipped", {
+      entry: extensionEntry,
+      previousEntry: processSlot.previous.entry,
+      previousAt: processSlot.previous.at,
+    });
+    console.error(
+      `[feishu] 同一进程内检测到第二份桥接扩展，已跳过加载（本份 ${extensionEntry}，`
+        + `已在用 ${processSlot.previous.entry}）。`
+        + "通常说明该插件在全局 ~/.pi/agent/npm 与工作区 .pi/npm 各装了一份、两处 settings 都注册了，请只保留一处。",
+    );
     return;
   }
 

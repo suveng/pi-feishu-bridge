@@ -25,8 +25,14 @@ function lockKeyFor(appId: string | undefined) {
  * 锁文件选址：一律在 Pi 的 agent 目录（`~/.pi/agent/locks.json`）。
  * 锁按 appId 全局互斥是护栏：飞书长连接是集群模式、不广播，
  * 同一台机器上多个工作区共用同一个机器人会互相抢连接，所以要放在机器级位置协商。
+ *
+ * `FEISHU_LOCKS_PATH` 仅供测试与隔离实验用：每次取值都重读环境变量，
+ * 这样单测可以指到临时目录，不会污染真实的 `~/.pi/agent/locks.json`。
  */
-const LOCKS_PATH = join(PI_AGENT_DIR, "locks.json");
+function locksPath() {
+  const override = process.env.FEISHU_LOCKS_PATH;
+  return override && override.trim() ? override : join(PI_AGENT_DIR, "locks.json");
+}
 
 export type GatewayOwner = {
   key: string;
@@ -117,6 +123,19 @@ export async function acquireGatewayLock(cwd: string, force = false, appId?: str
     const locks = readLocksFile();
     const existing = asGatewayOwner(locks[key], key);
     if (existing && !force && !isStale(existing)) {
+      // 同一进程内的第二份扩展副本会走到这里：锁的 owner 就是自己。
+      // 这不是互斥冲突，是「我自己的锁」——早先直接返回 busy，daemon 启动分支把它当成
+      // 「别人占着」并 process.exit(0)，于是 autoStart 拉起一个死一个、飞书永远连不上
+      // （2026-11-21 事故：全局 npm 与工作区 npm 各装一份 0.6.6，同进程加载两遍）。
+      // 现在复用同一把锁：同一个 token、不重写文件，两份副本共享心跳与 owner，谁都不会被判丢失。
+      if (existing.pid === process.pid) {
+        debugLog("feishu.gateway.lock_reuse_own", {
+          pid: existing.pid,
+          status: existing.status,
+          heartbeatAt: existing.heartbeatAt,
+        });
+        return { status: "acquired", handle: new GatewayLockHandle(existing) };
+      }
       debugLog("feishu.gateway.lock_busy", {
         ownerPid: existing.pid,
         heartbeatAt: existing.heartbeatAt,
@@ -172,7 +191,7 @@ export function readAllGatewayOwnerPids(): number[] {
 }
 
 export function gatewayLockPath() {
-  return LOCKS_PATH;
+  return locksPath();
 }
 
 function asGatewayOwner(value: unknown, expectedKey: string): GatewayOwner | undefined {
@@ -196,8 +215,11 @@ function isProcessAlive(pid: number) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // EPERM = 进程存在但不属于当前用户（如 launchd pid 1 或别的账号起的 daemon）。
+    // 早先把任何抛错都当成「进程不存在」，于是别人的锁会被判成 stale 直接抢走。
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    return code === "EPERM";
   }
 }
 
@@ -206,22 +228,24 @@ function randomToken() {
 }
 
 function readLocksFile(): LocksFile {
+  const path = locksPath();
   try {
-    if (!existsSync(LOCKS_PATH)) return {};
-    return JSON.parse(readFileSync(LOCKS_PATH, "utf8")) as LocksFile;
+    if (!existsSync(path)) return {};
+    return JSON.parse(readFileSync(path, "utf8")) as LocksFile;
   } catch {
     return {};
   }
 }
 
 function writeLocksFile(locks: LocksFile) {
-  mkdirSync(dirname(LOCKS_PATH), { recursive: true });
-  writeFileSync(LOCKS_PATH, `${JSON.stringify(locks, null, 2)}\n`, "utf8");
+  const path = locksPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(locks, null, 2)}\n`, "utf8");
 }
 
 async function withLocksFileLock<T>(fn: () => T | Promise<T>): Promise<T> {
-  const lockPath = `${LOCKS_PATH}.lock`;
-  mkdirSync(dirname(LOCKS_PATH), { recursive: true });
+  const lockPath = `${locksPath()}.lock`;
+  mkdirSync(dirname(lockPath), { recursive: true });
 
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
     if (tryAcquireFileLock(lockPath)) {
