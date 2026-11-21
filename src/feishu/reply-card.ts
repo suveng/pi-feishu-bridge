@@ -117,6 +117,10 @@ export class ReplyCard implements ReplyCardSink {
   /** 当前段的卡片消息 ID（超时/收尾刷新用） */
   private segmentMessageId: string | undefined;
   get bodyText() { return this.body; }
+  /** 当前卡片状态；定时任务跑完要据此回写「成功 / 失败」 */
+  get finalStatus(): ReplyCardStatus { return this.status; }
+  /** 覆盖卡片标题（定时任务的卡片要显示任务名，而不是默认的「回复」） */
+  setTitle(title: string) { this.title = title; }
   /** 停在「等用户选择」的中间态；askUser 出临界区前必须消掉 */
   get paused() { return this.status === "paused"; }
   private cardkit: CardKitStream | undefined;

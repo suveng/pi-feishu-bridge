@@ -18,17 +18,34 @@ import {
 import { debugLog } from "./debug.ts";
 import { loadConfig } from "./config.ts";
 import { setRuntimeConfig } from "./runtime-config.ts";
+import { isScheduleActionValue } from "./schedule-cards.ts";
 import { parseStopTaskActionValue } from "./reply-card.ts";
 import type { ConversationRuntime } from "./runtime.ts";
+import type { FeishuScheduleService } from "./schedule-service.ts";
 import type { FeishuTransport } from "./transport.ts";
 import type { FeishuCardAction } from "./types.ts";
 
 export function createCardActionHandler(
   conversations: ConversationRuntime,
   getTransport: () => FeishuTransport | undefined,
+  schedule?: FeishuScheduleService,
 ) {
   return async (action: FeishuCardAction) => {
     const transport = getTransport();
+
+    // 定时任务卡片：暂停/恢复、立即执行、改通知、删除、新建表单，统一交给 FeishuScheduleService
+    if (isScheduleActionValue(action.value)) {
+      if (!schedule) return;
+      try {
+        return await schedule.handleAction(action);
+      } catch (error) {
+        debugLog("feishu.schedule.action_failed", {
+          action: (action.value as any)?.action,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+    }
 
     // feishu_ask 选择题：记录答案并原地刷新同一张卡
     const askAnswer = parseAskAnswerActionValue(action.value);

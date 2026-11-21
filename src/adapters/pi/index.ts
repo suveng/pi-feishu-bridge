@@ -35,6 +35,9 @@ import { BotUnavailableError, FeishuTransport } from "../../feishu/transport.ts"
 import { withBackoffRetry } from "../../feishu/retry.ts";
 import type { FeishuConfig, FeishuStatus } from "../../feishu/types.ts";
 import { createCardActionHandler } from "../../feishu/card-actions.ts";
+import { FeishuScheduleService } from "../../feishu/schedule-service.ts";
+import { FeishuScheduler } from "../../feishu/scheduler.ts";
+import { ScheduleStore } from "../../feishu/schedule-store.ts";
 import { LearnApprovalClient } from "../../feishu/learn-approval.ts";
 import { resolveCardTarget } from "../../feishu/reply-card.ts";
 import { installExitFlush } from "../../feishu/live-cards.ts";
@@ -99,7 +102,21 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     promptNotifySec: initialConfig?.promptNotifySec,
     promptTimeoutSec: initialConfig?.promptTimeoutSec,
   });
+  const scheduleStore = new ScheduleStore();
+  const scheduler = new FeishuScheduler({
+    store: scheduleStore,
+    conversations,
+    getTransport: () => transport,
+    getBridgeStore: () => bridgeStore,
+  });
+  const scheduleService = new FeishuScheduleService({
+    store: scheduleStore,
+    scheduler,
+    getTransport: () => transport,
+  });
   const messageHandler = new FeishuMessageHandler(conversations, () => transport, bridgeStore, {
+    // /sched：定时任务的建/改/删/跑全在飞书里完成
+    schedule: scheduleService,
     /**
      * 飞书里 `/restart`：换一份新代码继续跑，会话上下文不丢。
      *
@@ -346,6 +363,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     writeOwnerWorkspace(process.cwd());
     gatewayLock = lockResult.handle;
     gatewayLock.setOnLost(async () => {
+      scheduler.stop();
       await transport?.stop();
       transport = undefined;
       gatewayLock = undefined;
@@ -355,7 +373,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
         process.exit(0);
       }
     });
-    transport = new FeishuTransport(cfg, (msg) => messageHandler.handle(msg), createCardActionHandler(conversations, () => transport));
+    transport = new FeishuTransport(cfg, (msg) => messageHandler.handle(msg), createCardActionHandler(conversations, () => transport, scheduleService));
     const startedTransport = transport;
     try {
       // 启动期一次性初始化最容易撞上瞬时断连（ECONNRESET / socket hang up）：
@@ -373,6 +391,8 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
       gatewayLock.startHeartbeat();
       await gatewayLock.update("connected");
       updateStatus("connected");
+      // 拿到网关锁 = 本进程是这份实例的唯一拥有者，定时任务只能在这里跑（否则多副本会重复触发）。
+      scheduler.start();
       // 刚接过网关锁 = 很可能是一次 /restart 的结果：把上一张「重启中」卡片改成终态。
       // 失败不影响连接（回执只是体验），所以不 await 抛错。
       void ackRestartIfPending(startedTransport).catch(() => undefined);
@@ -387,6 +407,8 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   }
 
   async function stop() {
+    // 先停调度：否则停服瞬间还会往飞书发一条注定发不出去的卡片
+    scheduler.stop();
     await transport?.stop();
     transport = undefined;
     await gatewayLock?.release();

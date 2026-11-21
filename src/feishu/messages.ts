@@ -11,6 +11,7 @@ export type BotCommand =
   | { name: "status" }
   | { name: "commands" }
   | { name: "delivery" }
+  | { name: "sched"; args: string }
   | { name: "config"; key?: string; value?: string; clearTarget?: string }
   | { name: "restart"; force?: boolean };
 
@@ -183,6 +184,10 @@ export function parseBotCommand(text: string): BotCommand | undefined {
   if (normalized === "/status") return { name: "status" };
   if (normalized === "/commands") return { name: "commands" };
   if (normalized === "/delivery") return { name: "delivery" };
+  // /sched：定时任务管理面板；后面可以带子命令或「时间 | 任务内容」一句话建任务
+  if (normalized === "/sched") return { name: "sched", args: "" };
+  const schedMatch = trimmed.match(/^\/sched(?:\s+([\s\S]+))?$/);
+  if (schedMatch) return { name: "sched", args: (schedMatch[1] || "").trim() };
   // /restart：重启桥接进程（保留会话上下文）。force = 有回复在生成时强行中止后重启。
   if (normalized === "/restart") return { name: "restart" };
   if (normalized === "/restart force") return { name: "restart", force: true };
@@ -216,6 +221,7 @@ export function getCommandList(): string {
     "/status — 查看当前模型、思考强度、目录和状态",
     "/stop — 停止当前生成",
     "/delivery — 设置「正在生成时又收到新消息」怎么处理（排队 / 立即打断，仅私聊）",
+    "/sched — 定时任务：到点让 Pi 跑一轮并把结果发回会话（面板 / 新建 / 一句话建任务）",
     "/restart — 重启桥接进程，加载最新代码（保留会话上下文；/restart force 强制中止在跑的回复）",
     "/config — 查看/修改运行时配置（群触发、流式等）",
     "/config <key> <value> — 设置白名单配置并立即生效",

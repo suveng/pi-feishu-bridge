@@ -43,6 +43,7 @@ export const FEISHU_SLASH_COMMANDS: SlashCommandSpec[] = [
   { command: "restart", zh: "重启桥接进程并加载最新代码（保留会话上下文）", en: "Restart the bridge and reload code (session kept)" },
   // interrupt 模式为 Pi 侧实现
   { command: "delivery", zh: "设置「正在生成时又收到新消息」怎么处理（排队 / 立即打断，仅私聊）", en: "How to handle new messages while replying (queue / interrupt, DM only)" },
+  { command: "sched", zh: "定时任务：到点让 Pi 跑一轮并把结果发回会话", en: "Scheduled tasks: run Pi on a schedule and post the result back to Feishu" },
   // --- 由 Pi 侧扩展（knowledge-flow）注册的命令 ---
   // 面板的作用是「提示用户有哪些命令可用」：飞书斜杠指令点击后只是把命令文本
   // 插进输入框（不会自动执行），用户补完参数再发送。所以这里保留全部命令，

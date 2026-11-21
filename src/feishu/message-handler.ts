@@ -15,6 +15,7 @@ import { conversationKey, conversationLabel, buildPromptWithQuote, buildRequeste
 import { resolveUserName } from "./user-name.ts";
 import { ReplyCard, resolveCardTarget } from "./reply-card.ts";
 import type { FeishuBridgeStore } from "./bridge-store.ts";
+import type { FeishuScheduleService } from "./schedule-service.ts";
 import type { FeishuTransport } from "./transport.ts";
 import type { FeishuMessage } from "./types.ts";
 
@@ -37,6 +38,8 @@ export type RestartRequest = {
 
 export type FeishuMessageHandlerHooks = {
   restart?: (request: RestartRequest) => Promise<{ ok: boolean; error?: string }>;
+  /** 定时任务服务：/sched 命令交给它处理（卡片面板、新建、一句话建任务） */
+  schedule?: FeishuScheduleService;
 };
 
 export class FeishuMessageHandler {
@@ -352,6 +355,16 @@ export class FeishuMessageHandler {
       if (!result.ok) {
         await transport.replyText(msg.messageId, `❌ 无法重启：${result.error || "未知原因"}`);
       }
+      return true;
+    }
+
+    if (command.name === "sched") {
+      const schedule = this.hooks.schedule;
+      if (!schedule) {
+        await transport.replyText(msg.messageId, "定时任务未启用（当前运行方式没有挂载调度器）。");
+        return true;
+      }
+      await schedule.handleCommand(msg, command.args);
       return true;
     }
 

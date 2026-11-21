@@ -336,7 +336,7 @@ function escapeMarkdown(text: string) {
   return text.replace(/[`*_~]/g, "\\$&");
 }
 
-function sharedCardConfig() {
+export function sharedCardConfig() {
   return {
     wide_screen_mode: true,
     update_multi: true,

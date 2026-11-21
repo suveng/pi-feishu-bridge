@@ -34,8 +34,7 @@ export class FeishuBridgeStore {
     this.write(state);
   }
 
-  getRoute(sessionKey: string): FeishuRoute | undefined {
-    return this.read().routes[sessionKey];
+  getRoute(sessionKey: string): FeishuRoute | undefined {    return this.read().routes[sessionKey];
   }
 
   bindJob(sessionKey: string, jobId: string, jobName?: string, sessionId?: string): FeishuJobRoute | undefined {
@@ -57,6 +56,37 @@ export class FeishuBridgeStore {
 
   getJob(jobId: string): FeishuJobRoute | undefined {
     return this.read().jobs[jobId];
+  }
+
+  /**
+   * 给定时任务的会话 key 绑一条路由。
+   * 模型在这些会话里调 feishu_ask 时，提问卡要能发回任务的通知会话，
+   * 没有路由会直接抛「找不到该会话的路由」。
+   */
+  bindScheduledRoute(
+    sessionKey: string,
+    target: { chatId: string; chatType: "p2p" | "group"; threadMessageId?: string },
+  ): FeishuRoute {
+    const state = this.read();
+    const route: FeishuRoute = {
+      sessionKey,
+      chatId: target.chatId,
+      chatType: target.chatType,
+      threadMessageId: target.threadMessageId,
+      lastMessageId: target.threadMessageId || "",
+      updatedAt: Date.now(),
+    };
+    state.routes[sessionKey] = route;
+    this.write(state);
+    return route;
+  }
+
+  /** 任务删了就把它的临时路由一起清掉，避免桥接状态文件一直膨胀 */
+  unbindRoute(sessionKey: string) {
+    const state = this.read();
+    if (!state.routes[sessionKey]) return;
+    delete state.routes[sessionKey];
+    this.write(state);
   }
 
   markSent(deliveryKey: string) {
