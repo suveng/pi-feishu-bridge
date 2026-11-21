@@ -36,6 +36,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { reapDetachedDaemonProcesses } from "./src/adapters/pi/index.ts";
+import { gatewayLockPath, readAllGatewayOwnerPids } from "./src/feishu/gateway-lock.ts";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const alive = (pid) => {
@@ -174,6 +175,16 @@ async function waitForChild(parentPid, timeoutMs = 8000) {
   const orphan = await waitForShape(orphanWrapper.pid);
   const foreign = await waitForShape(foreignWrapper.pid);
 
+  // 【前提自检】形状没认出来就别往下走：没有真身 pid 的锁等于 keep 集合为空，
+  // 回收器会把「有主」的 daemon 一起杀掉，最终只剩一句含糊的「探针应认出…」。
+  // 这里显式失败并打出启动壳下面实际挂了什么，CI 红一次就能定位（Linux 上曾出现）。
+  for (const [name, shape] of [["owned", owned], ["orphan", orphan], ["foreign", foreign]]) {
+    if (!shape.real || !shape.tail) {
+      console.error("SHAPE_MISSING " + JSON.stringify({ name, shape, tree: treeOf(shape.wrapper) }));
+      process.exit(3);
+    }
+  }
+
   const agentDir = join(process.env.HOME, ".pi", "agent");
   const locksPath = join(agentDir, "locks.json");
   mkdirSync(agentDir, { recursive: true });
@@ -190,6 +201,19 @@ async function waitForChild(parentPid, timeoutMs = 8000) {
     // 无关插件的锁：不该被当成 daemon 认领，也不该影响判断
     "some-other-plugin.lock": { pid: process.pid },
   }, null, 2));
+
+  // 【前提自检】回收器读的是模块自己的锁路径与「活着」判定：
+  // 写进去的锁若不被它读到，keep 集合就是空的，下面的断言会变成误杀。
+  const moduleLocksPath = gatewayLockPath();
+  if (moduleLocksPath !== locksPath) {
+    console.error("LOCKS_PATH_MISMATCH " + JSON.stringify({ written: locksPath, module: moduleLocksPath, home: process.env.HOME }));
+    process.exit(4);
+  }
+  const keepBefore = readAllGatewayOwnerPids();
+  if (!keepBefore.includes(owned.real)) {
+    console.error("KEEP_MISSING " + JSON.stringify({ real: owned.real, keep: keepBefore, moduleLocksPath }));
+    process.exit(5);
+  }
 
   // 【前提】必须在 reap 之前算：被回收掉的进程在 ps 里就查不到了，
   // 断言会变成「launcherIsRoot=false」，把「前提不成立」和「真被误杀」两件事混在一起。
