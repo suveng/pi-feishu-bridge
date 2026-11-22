@@ -56,7 +56,7 @@ export function buildCardKitCardJson(input: {
   progressTitle?: string;
   /**
    * 是否把清单收进折叠面板（默认 true）。
-   * steps 档清单很长，必须收起；action / timeout 档本来就一行，展开更直接。
+   * steps / smart 档清单可能很长，必须收起；action / timeout 档本来就一行，展开更直接。
    */
   progressCollapsed?: boolean;
   /** 覆盖默认标题；续段用「回复（接上条）」交代上下文 */

@@ -190,8 +190,9 @@ export class ReplyCard implements ReplyCardSink {
           title: this.title,
           note: this.note,
           progressEnabled: progressNeedsElement(this.streamOpts.progressMode),
-          // steps 档清单可能几十行，收进折叠面板；action / timeout 档只有一行，展开更直接
-          progressCollapsed: this.streamOpts.progressMode === "steps",
+          // steps / smart 档清单有多行，收进折叠面板；action / timeout 档只有一行，展开更直接
+          progressCollapsed:
+            this.streamOpts.progressMode === "steps" || this.streamOpts.progressMode === "smart",
           onOutboundMessageId: (id) => {
             this.segmentMessageId = id;
             this.transport.rememberOutboundMessageId?.(id);

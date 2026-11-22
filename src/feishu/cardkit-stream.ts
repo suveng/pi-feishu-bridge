@@ -48,7 +48,7 @@ export type CardKitStreamOptions = {
    * 建卡时不留位，后续再想写清单就 PUT 不上去。
    */
   progressEnabled?: boolean;
-  /** 是否把清单收进折叠面板（默认 true；action / timeout 档只有一行，不必收） */
+  /** 是否把清单收进折叠面板（默认 true；steps / smart 档收起，action / timeout 只有一行，不必收） */
   progressCollapsed?: boolean;
   /** 记录本 bot 发出的消息 id（供 groupAlsoOnReply） */
   onOutboundMessageId?: (messageId: string) => void;

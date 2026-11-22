@@ -6,9 +6,11 @@
  * 由 CardKitStream 推到卡片的独立 markdown 元件（element_id: progress）上，
  * 与正文元件互不抢空间。
  *
- * 四档展示（对应 progressMode 配置）：
+ * 五档展示（对应 progressMode 配置）：
  * - off     ：不展示，等价于改造前的行为
  * - steps   ：累积清单，每行一个工具（✅/⏳/❌/⛔ + 工具名 + 命令 + 耗时）
+ * - smart   ：精简版 steps —— 历史只留耗时 ≥1 分钟的步骤（最多 20 条），
+ *             当前命令常驻最后一行，长命令每 30 秒才刷新一次耗时（省飞书 API 配额）
  * - action  ：只显示当前这一个工具那一行
  * - timeout ：平时不显示，单个工具超过阈值才提示「已执行 Ns…」
  */
@@ -18,7 +20,14 @@ import { debugLog } from "./debug.ts";
 export const OVERSIZE_PROGRESS_BYTES = 8 * 1024;
 
 /** 过程展示档位 */
-export type ProgressMode = "off" | "steps" | "action" | "timeout";
+export type ProgressMode = "off" | "steps" | "smart" | "action" | "timeout";
+
+/** smart 档：历史步骤最短耗时（秒）——短命令不留痕，只记住值得看的慢步骤 */
+export const SMART_HISTORY_SECONDS = 60;
+/** smart 档：历史步骤最多保留条数 */
+export const SMART_MAX_HISTORY = 20;
+/** smart 档：长命令耗时的刷新粒度（秒）——比 steps 的 5 秒稀，避免刷爆卡片接口 */
+export const SMART_REFRESH_SECONDS = 30;
 
 /** 单条工具执行记录 */
 export type ProgressEntry = {
@@ -44,11 +53,15 @@ export type ProgressTrackerOptions = {
   /** 单行命令上限字符数（默认 200） */
   commandChars?: number;
   /**
-   * 耗时文本的刷新粒度秒数（默认 5）。
+   * 耗时文本的刷新粒度秒数（默认 5；smart 档内部至少 30）。
    * 量化到固定粒度，文本才会「五分钟一变」而不是每个 tick 都变，
    * 否则 action / timeout 档会每次 tick 就 PUT 一次卡片。
    */
   refreshSeconds?: number;
+  /** smart 档：历史只保留耗时达到该秒数的步骤（默认 60） */
+  smartHistorySeconds?: number;
+  /** smart 档：历史最多保留多少条（默认 20） */
+  smartMaxHistory?: number;
 };
 
 const DEFAULT_COMMAND_CHARS = 200;
@@ -183,6 +196,8 @@ export class ProgressTracker {
     this.opts = {
       commandChars: DEFAULT_COMMAND_CHARS,
       refreshSeconds: DEFAULT_REFRESH_SECONDS,
+      smartHistorySeconds: SMART_HISTORY_SECONDS,
+      smartMaxHistory: SMART_MAX_HISTORY,
       ...options,
     };
   }
@@ -250,8 +265,9 @@ export class ProgressTracker {
    */
   render(now: number = Date.now()): string | undefined {
     if (this.opts.mode === "off" || this.entries.length === 0) return undefined;
-    // 统一加引用前缀：三个档位的输出都要与正文区分开
+    // 统一加引用前缀：各档位的输出都要与正文区分开
     if (this.opts.mode === "steps") return quoteLines(this.renderSteps());
+    if (this.opts.mode === "smart") return quoteLines(this.renderSmart(now) ?? "") || undefined;
     if (this.opts.mode === "action") return quoteLines(this.renderAction(now) ?? "") || undefined;
     return quoteLines(this.renderTimeout(now) ?? "") || undefined;
   }
@@ -292,9 +308,53 @@ export class ProgressTracker {
     return `⚠️ **${running.toolName}** 已执行 ${formatDuration(elapsed)}…`;
   }
 
-  /** 把耗时量化到 refreshSeconds 粒度，避免文本每 tick 都变 */
+  /**
+   * smart 档：只留「值得看」的东西。
+   *
+   * - 历史：只保留耗时 ≥ smartHistorySeconds 的已结束步骤，最多 smartMaxHistory 条
+   * - 当前：正在执行的命令常驻最后一行，跑够阈值才追加耗时（按 30 秒粒度量化）
+   *
+   * 短命令只在开始/结束各变一次文本；长命令每 30 秒才变一次 —— 相比 steps 的
+   * 逐条累积 + 5 秒粒度，卡片更新频率降一个数量级，防刷爆飞书接口。
+   */
+  private renderSmart(now: number): string | undefined {
+    const minMs = Math.max(1, this.opts.smartHistorySeconds) * 1000;
+    const { kept, omitted } = this.smartHistory(minMs);
+    const lines = kept.map(formatProgressLine);
+    if (omitted > 0) lines.unshift(`… 更早 ${omitted} 步已省略 …`);
+    for (const entry of this.entries) {
+      if (entry.endedAt != null) continue;
+      lines.push(formatRunningLine(entry, now, minMs, this.elapsedStepMs()));
+    }
+    if (lines.length === 0) return undefined;
+    return lines.join("\n");
+  }
+
+  /**
+   * smart 档要保留的历史步骤（只算已结束且跑够阈值的，超上限截掉最早的）。
+   *
+   * 清单与折叠标题共用它，两处数字才对得上。
+   */
+  private smartHistory(minMs: number): { kept: ProgressEntry[]; omitted: number } {
+    const max = Math.max(1, this.opts.smartMaxHistory);
+    const long = this.entries.filter(
+      (entry) => entry.endedAt != null && entry.endedAt - entry.startedAt >= minMs,
+    );
+    const kept = long.slice(Math.max(0, long.length - max));
+    return { kept, omitted: long.length - kept.length };
+  }
+
+  /** 耗时量化步长：smart 档最稀（至少 30 秒），其余按 refreshSeconds */
+  private elapsedStepMs(): number {
+    const seconds = this.opts.mode === "smart"
+      ? Math.max(this.opts.refreshSeconds, SMART_REFRESH_SECONDS)
+      : this.opts.refreshSeconds;
+    return Math.max(1, seconds) * 1000;
+  }
+
+  /** 把耗时量化到固定粒度，避免文本每 tick 都变 */
   private quantizeElapsed(ms: number): number {
-    const step = Math.max(1, this.opts.refreshSeconds) * 1000;
+    const step = this.elapsedStepMs();
     return Math.floor(Math.max(0, ms) / step) * step;
   }
 
@@ -315,7 +375,15 @@ export class ProgressTracker {
   renderTitle(now: number = Date.now()): string {
     if (this.opts.mode === "off" || this.entries.length === 0) return "执行过程";
     const running = this.findRunning();
-    if (!running) return `执行过程（已完成 ${this.entries.length} 步）`;
+    if (!running) {
+      // smart 档清单被过滤过（只留长步骤），标题按同一口径计数，否则数字与清单对不上
+      if (this.opts.mode === "smart") {
+        const minMs = Math.max(1, this.opts.smartHistorySeconds) * 1000;
+        const { kept, omitted } = this.smartHistory(minMs);
+        return `执行过程（共 ${kept.length + omitted} 步）`;
+      }
+      return `执行过程（已完成 ${this.entries.length} 步）`;
+    }
     const elapsed = this.quantizeElapsed(now - running.startedAt);
     // 单个工具跑很久时，标题上的耗时是「还活着」最直接的证据
     const cost = elapsed >= this.opts.timeoutSeconds * 1000
@@ -324,6 +392,24 @@ export class ProgressTracker {
     const detail = running.detail ? ` · ${toSingleLine(running.detail, TITLE_DETAIL_CHARS)}` : "";
     return `执行过程（正在执行 ${running.toolName}${detail}${cost}）`;
   }
+}
+
+/**
+ * smart 档的运行中行：跑够阈值才追加耗时。
+ *
+ * 耗时按步长量化（默认 30 秒），所以长命令在跑的时候文本每 30 秒才变一次，
+ * 卡片接口不会被 tick 刷。
+ */
+function formatRunningLine(
+  entry: ProgressEntry,
+  now: number,
+  minMs: number,
+  stepMs: number,
+): string {
+  const base = formatProgressLine(entry);
+  const elapsed = Math.floor(Math.max(0, now - entry.startedAt) / Math.max(1, stepMs)) * stepMs;
+  if (elapsed < minMs) return base;
+  return `${base}  · 已 ${formatDuration(elapsed)}`;
 }
 
 /** 该档位是否需要卡片上预留 progress 元件（off 档不预留，零开销） */

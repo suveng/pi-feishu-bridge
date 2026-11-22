@@ -18,7 +18,7 @@ export type ReplyCardStreamOptions = {
   /** 服务端推送 fullText 到 CardKit 的间隔 ms（默认 120） */
   pushIntervalMs?: number;
   /** 工具过程展示档位（默认取配置，配置缺省 steps） */
-  progressMode?: "off" | "steps" | "action" | "timeout";
+  progressMode?: "off" | "steps" | "smart" | "action" | "timeout";
   /** 清单最多保留多少行（默认 50） */
   progressMaxLines?: number;
   /** 超过该秒数才显示耗时（默认 30） */
@@ -50,7 +50,7 @@ export function resolveStreamOptions(override?: ReplyCardStreamOptions) {
         ?? cfg?.streamPushIntervalMs
         ?? 120,
     ),
-    // 默认 off：不展示工具过程；想看过程用 /config progressMode <steps|action|timeout> 打开
+    // 默认 off：不展示工具过程；想看过程用 /config progressMode <steps|smart|action|timeout> 打开
     progressMode: override?.progressMode ?? cfg?.progressMode ?? "off",
     progressMaxLines: clampInt(override?.progressMaxLines ?? cfg?.progressMaxLines ?? 50, 3, 100),
     progressTimeoutSeconds: Math.max(

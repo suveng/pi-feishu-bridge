@@ -45,10 +45,11 @@ export type RuntimeConfigView = {
    * 工具执行过程展示档位（默认 off）：
    * - off：不展示，等价于改造前
    * - steps：累积清单（工具名 + 命令 + 耗时 + 成败）
+   * - smart：精简清单，只留耗时 ≥60s 的过程（最多 20 条），运行中条目 30s 刷一次
    * - action：只显示当前这一个工具
    * - timeout：平时不显示，单个工具超阈值才提示
    */
-  progressMode?: "off" | "steps" | "action" | "timeout";
+  progressMode?: "off" | "steps" | "smart" | "action" | "timeout";
   /** 清单最多保留多少行，超出折叠（默认 50） */
   progressMaxLines?: number;
   /** 超过该秒数才显示耗时（默认 30） */
@@ -108,9 +109,9 @@ export function parseRuntimeConfigValue(key: string, raw: string): ParseResult {
       return { ok: true, value: text as "queue" | "interrupt" };
     }
     case "progressMode": {
-      const allowed = ["off", "steps", "action", "timeout"] as const;
+      const allowed = ["off", "steps", "smart", "action", "timeout"] as const;
       if (!(allowed as readonly string[]).includes(text)) {
-        return { ok: false, error: "progressMode 仅支持 off | steps | action | timeout" };
+        return { ok: false, error: "progressMode 仅支持 off | steps | smart | action | timeout" };
       }
       return { ok: true, value: text as (typeof allowed)[number] };
     }

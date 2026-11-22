@@ -956,7 +956,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
             ctx.ui.notify(
               `飞书进度展示：${progressCfg?.progressMode ?? "off"}`
               + `（清单上限 ${progressCfg?.progressMaxLines ?? 50} 行，耗时阈值 ${progressCfg?.progressTimeoutSeconds ?? 30}s）\n`
-              + "用法：/feishu progress steps | action | timeout | off",
+              + "用法：/feishu progress steps | smart | action | timeout | off",
               "info",
             );
             return;

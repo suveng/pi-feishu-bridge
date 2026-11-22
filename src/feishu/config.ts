@@ -231,10 +231,14 @@ export function removePath(path: string) {
   rmSync(path, { recursive: true, force: true });
 }
 
-/** 工具过程展示档位：off / steps / action / timeout（非法值当作未设，回落默认档） */
-function parseProgressMode(raw: unknown): "off" | "steps" | "action" | "timeout" | undefined {
+/** 工具过程展示档位：off / steps / smart / action / timeout（非法值当作未设，回落默认档） */
+function parseProgressMode(
+  raw: unknown,
+): "off" | "steps" | "smart" | "action" | "timeout" | undefined {
   const v = typeof raw === "string" ? raw.trim().toLowerCase() : "";
-  if (v === "off" || v === "steps" || v === "action" || v === "timeout") return v;
+  if (v === "off" || v === "steps" || v === "smart" || v === "action" || v === "timeout") {
+    return v;
+  }
   return undefined;
 }
 
