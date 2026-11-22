@@ -121,7 +121,10 @@ pi install git:gitee.com/suveng/pi-feishu-bridge   # 国内更快
 | `/feishu stop`      | 停止飞书桥接              |
 | `/feishu restart`   | 重启桥接，并重新加载最新代码和配置   |
 | `/feishu status`    | 查看连接状态、当前 owner 和配置 |
-| `/feishu autostart` | 开关自动启动              |
+| `/feishu autostart`        | 查看开机自启状态（登记的工作区、LaunchAgent、日志位置） |
+| `/feishu autostart on`     | 把**当前工作区**登记进开机自启（macOS 登录即起，按工作区累计） |
+| `/feishu autostart off`    | 只取消当前工作区（其它工作区继续自启；正在跑的 daemon 不停） |
+| `/feishu autostart pi on\|off` | 旧语义：Pi 进程启动时是否自动拉起 daemon（仅当前会话） |
 | `/feishu debug`     | 查看最近 20 条调试日志       |
 | `/feishu reset`     | 清除配置和映射，但保留会话历史     |
 
@@ -258,7 +261,14 @@ cd ~/work/b && pi     # 工作区 B：直接用（各自机器人凭证写在各
 
 **飞书一直连不上，`daemon.log` 里反复出现 `[feishu] daemon found existing owner, exiting`？** 先确认插件至少 0.6.7：老版本在同一 Pi 进程里加载两份桥接扩展时，会各 spawn 一个 daemon 并互相把对方写的网关锁判成 busy。征兆很固定：`debug.pi.log` 里先 `feishu.gateway.lock_acquired`、约 200ms 后 `feishu.gateway.lock_busy`，且 `ownerPid` 与 `currentPid` 是同一个数；`ps` 里能看到两条 `tail -f /dev/null | exec pi … -e …` 但 `-e` 路径不同。0.6.7 起同 pid 的锁按「复用」而不是「busy」处理，0.6.8 起两份副本按作用域隔离。
 
-**能开机自启动吗？** 暂未实现。目前需要电脑开机后手动启动一次 Pi agent，之后即可关闭前台，在飞书/Lark 里继续对话。
+**能开机自启动吗？** 能（0.8.0 起，仅 macOS）。`/feishu autostart on` 会把**当前工作区**登记进系统级自启，多个工作区可累计：
+
+- 触发方式是 LaunchAgent `~/Library/LaunchAgents/com.suveng.pi-feishu.autostart.plist`（`RunAtLoad` 登录即跑，`KeepAlive.SuccessfulExit=false` 只随崩溃重启 —— 否则关掉自启会变无限重启循环）。
+- 它只启动一个**守护脚本**（`scripts/autostart-supervisor.mjs`），每 20s 巡检各工作区实例：daemon 没在跑就用与 `startDaemon` 完全相同的命令拉起来（`tail -f /dev/null | exec pi --mode rpc -e <入口>`），同一 appId 被别的工作区持有时不抢。
+- 登记表在 `~/.pi/agent/feishu-autostart.json`，守护日志 `~/.pi/agent/feishu-autostart.log`；关自启用 `/feishu autostart off`（只移除当前工作区，最后一个移除时连带卸载 LaunchAgent）。
+- 单个机器人不想参与自启，在它的 `config.pi.json` 里写 `"autoStart": false` 即可跳过。
+- 不写死 node 路径：plist 只跑 `/bin/sh <包内 autostart-launch.sh>`，由它现找 node（fnm/brew 升级后不会静默失效）。
+- 与旧 `autoStart` 的区别：`/feishu autostart pi on|off` 管的是「Pi 进程启动时拉起 daemon」，只管当前会话；开机自启是系统级的。
 
 ## 发布（维护者）
 

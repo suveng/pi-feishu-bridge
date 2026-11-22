@@ -43,6 +43,18 @@ import { resolveCardTarget } from "../../feishu/reply-card.ts";
 import { installExitFlush } from "../../feishu/live-cards.ts";
 import { electExtensionLeader } from "../../feishu/process-guard.ts";
 import { daemonCommand, daemonSpec } from "../../feishu/daemon-spec.ts";
+import {
+  AUTOSTART_LOG_PATH,
+  AUTOSTART_PLIST_PATH,
+  installLaunchAgent,
+  launchAgentLoaded,
+  readAutostartRegistry,
+  removeAutostartEntry,
+  resolveNodeBinary,
+  resolvePiBinary,
+  uninstallLaunchAgent,
+  upsertAutostartEntry,
+} from "../../feishu/autostart.ts";
 import { ackRestartIfPending, requestRestart, type RestartTrigger } from "../../feishu/restart.ts";
 import { PiConversationRuntime, handlePiMessageEnd } from "./PiConversationRuntime.ts";
 
@@ -603,6 +615,103 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
       const cmd = (parts[0] || "status").toLowerCase();
       const cmdArg = (parts[1] || "").toLowerCase();
       const cmdArg2 = (parts[2] || "").toLowerCase();
+      /** 开机自启的引导脚本（/bin/sh 拉它，它现找 node 再 exec supervisor）。 */
+      function autostartLauncherPath(): string {
+        return fileURLToPath(new URL("../../../scripts/autostart-launch.sh", import.meta.url));
+      }
+
+      /** 系统级开机自启的完整状态：登记了哪些工作区、每个实例的 daemon 活着没、LaunchAgent 加载没。 */
+      function describeAutostart(): string {
+        const registry = readAutostartRegistry();
+        const entries = Object.values(registry.entries);
+        const lines = [`开机自启（macOS 登录时，系统级）：${entries.length ? "已开启" : "未开启"}`];
+        if (!entries.length) lines.push("  用 /feishu autostart on 把当前工作区登记进来。");
+        for (const entry of entries) {
+          const instances = listInstances(entry.workspace).filter((instance) => instance.configured);
+          const states = instances.map((instance) => {
+            const owner = readGatewayOwner(instance.appId);
+            const tag = !instance.autoStart ? "，实例已关自启" : "";
+            return `${instance.name}（${owner ? "运行中" : "未运行"}${tag}）`;
+          });
+          const here = entry.workspace === process.cwd() ? " ← 当前" : "";
+          lines.push(`  ${entry.workspace}：${states.join("，") || "无已配置实例"}${here}`);
+        }
+        lines.push(`LaunchAgent：${launchAgentLoaded() ? "已加载" : "未加载"}（${AUTOSTART_PLIST_PATH}）`);
+        lines.push(`日志：${AUTOSTART_LOG_PATH}`);
+        const cfg = loadConfig();
+        lines.push(`Pi 内自动拉起：${cfg?.autoStart === false ? "关闭" : "开启"}（/feishu autostart pi on|off）`);
+        return lines.join("\n");
+      }
+
+      /** 把当前工作区登记进开机自启并安装 LaunchAgent；失败时给出可手工执行的命令。 */
+      function enableAutostart(ctx: any) {
+        if (!loadConfig()) {
+          ctx.ui.notify("当前工作区还没有飞书配置，先 /feishu setup。", "warning");
+          return;
+        }
+        const piBin = resolvePiBinary();
+        if (!piBin) {
+          ctx.ui.notify("找不到 pi 可执行文件（PATH 里没有 pi，也没有 ~/.pi/agent/bin/pi）。", "error");
+          return;
+        }
+        const launcherPath = autostartLauncherPath();
+        if (!existsSync(launcherPath)) {
+          ctx.ui.notify(`自启引导脚本缺失：${launcherPath}（安装包不完整，重装插件后再试）`, "error");
+          return;
+        }
+        const { added } = upsertAutostartEntry({
+          workspace: process.cwd(),
+          extensionPath: extensionEntry,
+          piBin,
+          nodeBin: resolveNodeBinary(),
+        });
+        const installed = installLaunchAgent({ launcherPath, workingDirectory: process.cwd() });
+        if (!installed.ok) {
+          ctx.ui.notify(
+            `已登记 ${process.cwd()}，但 LaunchAgent 安装失败：${installed.error}\n`
+              + `可手动执行：launchctl bootstrap gui/$(id -u) "${AUTOSTART_PLIST_PATH}"`,
+            "error",
+          );
+          return;
+        }
+        const instances = listInstances(process.cwd()).filter((instance) => instance.configured && instance.autoStart);
+        ctx.ui.notify(
+          [
+            `✅ 已开启开机自启（${added ? "新登记" : "更新登记"}）`,
+            `工作区：${process.cwd()}`,
+            `实例：${instances.map((instance) => instance.name).join("、") || "无"}`,
+            `LaunchAgent：${AUTOSTART_PLIST_PATH}（${installed.reloaded ? "已刷新" : "已加载"}）`,
+            "下次登录 macOS 自动拉起；当前连接不受影响，关掉用 /feishu autostart off。",
+          ].join("\n"),
+          "info",
+        );
+      }
+
+      /** 只移除当前工作区；还有别的登记项时保留 LaunchAgent（不碰其他工作区的自启）。 */
+      function disableAutostart(ctx: any) {
+        const { registry, removed } = removeAutostartEntry(process.cwd());
+        if (!removed) {
+          ctx.ui.notify(`当前工作区没有登记开机自启：${process.cwd()}`, "info");
+          return;
+        }
+        const remaining = Object.keys(registry.entries).length;
+        let tail: string;
+        if (remaining === 0) {
+          const result = uninstallLaunchAgent();
+          tail = result.ok ? "已卸载 LaunchAgent，下次开机不再自启。" : `LaunchAgent 卸载失败：${result.error}`;
+        } else {
+          const launcherPath = autostartLauncherPath();
+          const refreshed = existsSync(launcherPath)
+            ? installLaunchAgent({ launcherPath, workingDirectory: process.cwd() })
+            : { ok: false, reloaded: true, error: `引导脚本缺失：${launcherPath}` };
+          tail = refreshed.ok ? `其余 ${remaining} 个工作区继续开机自启。` : `刷新 LaunchAgent 失败：${refreshed.error}`;
+        }
+        ctx.ui.notify(
+          [`已取消开机自启：${process.cwd()}`, tail, "当前 daemon 不会因此停止，飞书照常可用。"].join("\n"),
+          "info",
+        );
+      }
+
       /** 解析 `/feishu bots <action> <名字>` 的目标目录；非法名字直接提示并返回 undefined。 */
       const instanceDirArg = (name: string): string | undefined => {
         const dir = dirForInstanceName(name);
@@ -781,15 +890,37 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
           return;
         }
         if (cmd === "autostart") {
-          const cfg = loadConfig();
-          if (!cfg) {
-            ctx.ui.notify("Missing config. Run /feishu setup first.", "warning");
+          // 旧语义保留：/feishu autostart pi —— 只管「Pi 进程启动时是否拉起 daemon」
+          if (cmdArg === "pi") {
+            const cfg = loadConfig();
+            if (!cfg) {
+              ctx.ui.notify("当前工作区还没有飞书配置，先 /feishu setup。", "warning");
+              return;
+            }
+            cfg.autoStart = cfg.autoStart === false;
+            writeJson(CONFIG_PI_PATH, cfg);
+            ctx.ui.notify(cfg.autoStart ? "Pi 内自动起飞书已开启。" : "Pi 内自动起飞书已关闭。", "info");
+            refreshStatusFromState();
             return;
           }
-          cfg.autoStart = cfg.autoStart === false;
-          writeJson(CONFIG_PI_PATH, cfg);
-          ctx.ui.notify(cfg.autoStart ? "飞书自动启动已开启。" : "飞书自动启动已关闭。", "info");
-          refreshStatusFromState();
+          // 新语义：/feishu autostart on|off|status —— macOS 登录级开机自启（按工作区）
+          if (!cmdArg || cmdArg === "status") {
+            ctx.ui.notify(describeAutostart(), "info");
+            return;
+          }
+          if (cmdArg === "on") {
+            enableAutostart(ctx);
+            return;
+          }
+          if (cmdArg === "off") {
+            disableAutostart(ctx);
+            return;
+          }
+          ctx.ui.notify(
+            "用法：/feishu autostart [on|off|status] —— 开机自启（macOS 系统级，按工作区）\n"
+              + "      /feishu autostart pi [on|off] —— Pi 进程内自动拉起 daemon（仅当前会话）",
+            "warning",
+          );
           return;
         }
         if (cmd === "tools") {
@@ -842,7 +973,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
           );
           return;
         }
-        ctx.ui.notify("可用命令：/feishu setup | start | stop | restart | status | debug | autostart | reset | tools on|off | progress <mode>", "info");
+        ctx.ui.notify("可用命令：/feishu setup | start | stop | restart | status | debug | autostart [on|off|status] | reset | tools on|off | progress <mode>", "info");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
