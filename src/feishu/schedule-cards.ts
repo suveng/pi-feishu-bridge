@@ -236,7 +236,10 @@ export function buildScheduleFormCard(options: { originLabel?: string } = {}) {
             input_type: "multiline_text",
             rows: 4,
             auto_resize: true,
-            max_length: 2000,
+            // 飞书输入框的 max_length 上限就是 1000，写 2000 整张卡片会被拒：
+            // 230099 / 11310 "max_length exceed the default maximum 1000"（HTTP 400，
+            // 桥接只显示 axios 的 "Request failed with status code 400"，很难看出原因）。
+            max_length: 1000,
           }),
           {
             tag: "button",
