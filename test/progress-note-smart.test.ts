@@ -120,6 +120,13 @@ test("smart：折叠标题按长步骤口径计数，运行中显示当前命令
   assert.match(running, /cargo test/);
 });
 
+test("smart：全是短命令时标题不写「共 0 步」", () => {
+  const t = tracker();
+  t.start("a", "bash", { command: "ls" }, T0);
+  t.end("a", true, T0 + 1_000);
+  assert.equal(t.renderTitle(T0 + 2_000), "执行过程");
+});
+
 test("smart：配置层接受 smart（runtime 与 config 同一套白名单）", () => {
   const ok = parseRuntimeConfigValue("progressMode", "smart");
   assert.deepEqual(ok, { ok: true, value: "smart" });

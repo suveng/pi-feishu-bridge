@@ -380,7 +380,9 @@ export class ProgressTracker {
       if (this.opts.mode === "smart") {
         const minMs = Math.max(1, this.opts.smartHistorySeconds) * 1000;
         const { kept, omitted } = this.smartHistory(minMs);
-        return `执行过程（共 ${kept.length + omitted} 步）`;
+        const total = kept.length + omitted;
+        // 全是短命令时清单本来就空，标题不要写「共 0 步」这种噪音
+        return total > 0 ? `执行过程（共 ${total} 步）` : "执行过程";
       }
       return `执行过程（已完成 ${this.entries.length} 步）`;
     }
