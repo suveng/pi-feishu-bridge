@@ -31,6 +31,7 @@ import {
   type AskQuestion,
 } from "../../feishu/ask.ts";
 import { ensureWorkspaceExists, resolveWorkspacePath } from "../../feishu/workspace.ts";
+import { createFeishuUiContext } from "./feishu-ui-context.ts";
 import {
   formatApprovalOutcome,
   formatSubmitOutcome,
@@ -1199,8 +1200,8 @@ export class PiConversationRuntime implements ConversationRuntime {
         const extra = "You are replying through Feishu/Lark. Keep answers concise and readable in chat. Do not use markdown tables. If you produced or saved an image file (screenshot, generated art, chart) and want the user to see it, put it on its own line as ![caption](/absolute/path/to/file.png) — the bridge uploads local images referenced this way and sends them as Feishu image messages (png/jpg/gif/webp/bmp, ≤10MB each, max 5 per reply). Relative paths resolve against the workspace cwd."
           // 平台身份与工具选择：本仓库注入的提问工具是 feishu_ask，
           // 不点名就会退回“回复 1A 2A”的纯文本选项
-          + " Platform: Feishu (飞书). When the user has to choose between options, call the `feishu_ask` tool (renders clickable card buttons) — never type options as text like '回复 1A 2A'."
-          + " `feishu_ask` is the ONLY option-asking tool in this session — never invent or call other ask tools, and never tell the user to reply with letters.";
+          + " Platform: Feishu (飞书). When the user has to choose between options, call `ask_user_question` if it is available, otherwise call `feishu_ask` — both render clickable Feishu card buttons. Never type options as plain text like '回复 1A 2A', and never tell the user to reply with letters."
+          + " Any extension dialog (ctx.ui.select / input / confirm) is also rendered as a Feishu card automatically, so option-asking extensions work here just like in the terminal.";
         return base?.trim() ? `${base}\n\n${extra}` : extra;
       },
     });
@@ -1233,7 +1234,16 @@ export class PiConversationRuntime implements ConversationRuntime {
       tools: ["feishu_ask", "feishu_learn_approval_submit", "feishu_learn_approval_status"],
     });
 
-    await session.bindExtensions({});
+    // 注入飞书 UI 上下文：扩展的 ctx.ui.select/input/confirm 渲染成飞书卡片（而非 noOp）。
+    // mode 必须为 "rpc"，提问类扩展（rpiv-ask-user-question）据此走对话框原语而非 TUI。
+    await session.bindExtensions({
+      uiContext: createFeishuUiContext({
+        sessionKey: key,
+        askUser: (askKey, questions) => this.askUser(askKey, questions),
+        pushUiNotify: (text) => this.pushUiNotify(text),
+      }),
+      mode: "rpc",
+    });
     this.bridge?.attachSession(key, session.sessionId);
     // 会话级长期订阅：保证 text_delta 在 prompt 期间一定能收到
     session.subscribe((event: any) => {

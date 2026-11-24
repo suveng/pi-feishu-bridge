@@ -160,24 +160,31 @@ export function buildAskCard(
 
     // 已经答过的问题不再给按钮和输入框，避免重复提交
     if (chosen) return;
-    elements.push({
-      tag: "action",
-      actions: question.options.slice(0, 4).map((option) => ({
-        tag: "button",
-        text: { tag: "plain_text", content: truncateLabel(`${optionLetter(question.options.indexOf(option))}. ${option.label}`) },
-        type: "default",
-        value: {
-          action: "pi_feishu_ask_answer",
-          askId,
-          questionIndex,
-          label: option.label,
-        },
-      })),
-    });
+    // 纯输入题（options 为空，如 ctx.ui.input）不渲染按钮区：
+    // 飞书会拒绝 actions 为空的 action 组件，这里直接跳过，只留下面的自由输入表单。
+    if (question.options.length) {
+      elements.push({
+        tag: "action",
+        actions: question.options.slice(0, 4).map((option) => ({
+          tag: "button",
+          text: { tag: "plain_text", content: truncateLabel(`${optionLetter(question.options.indexOf(option))}. ${option.label}`) },
+          type: "default",
+          value: {
+            action: "pi_feishu_ask_answer",
+            askId,
+            questionIndex,
+            label: option.label,
+          },
+        })),
+      });
+    }
 
     // 自由输入：表单容器 + 输入框 + 提交按钮。
     // 飞书规定表单内交互组件必须带全局唯一的 name，且容器内至少要有一个 submit 按钮；
     // 提交回调的 action.tag 仍是 button，值在 action.form_value 里。
+    const inputPlaceholder = question.options.length
+      ? "选项都不合适？在这里自己输入，再点「提交输入」"
+      : "在这里输入你的回答，再点「提交输入」";
     elements.push({
       tag: "form",
       name: `ask_form_${questionIndex}`,
@@ -185,7 +192,7 @@ export function buildAskCard(
         {
           tag: "input",
           name: askInputName(questionIndex),
-          placeholder: { tag: "plain_text", content: "选项都不合适？在这里自己输入，再点「提交输入」" },
+          placeholder: { tag: "plain_text", content: inputPlaceholder },
         },
         {
           tag: "button",

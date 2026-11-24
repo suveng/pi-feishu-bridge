@@ -231,6 +231,24 @@ test("正常作答不带 canceled 标记（否则整轮会被当成已作废）"
   assert.equal(outcome.timedOut, false);
 });
 
+test("buildAskCard：纯输入题（空 options）不渲染空按钮区，只留自由输入表单", () => {
+  const questions: AskQuestion[] = [{ header: "输入", question: "请输入你的回答", options: [] }];
+  const card = buildAskCard("ask_input", questions, [undefined], "pending");
+  const elements = card.elements as any[];
+  // 飞书会拒绝 actions 为空的 action 组件：纯输入题绝不能出现空按钮区
+  const actionRows = elements.filter((element) => element.tag === "action");
+  assert.equal(actionRows.length, 0, "空 options 不该渲染 action 组件");
+  const forms = elements.filter((element) => element.tag === "form");
+  assert.equal(forms.length, 1, "仍须有一个自由输入表单");
+  const input = forms[0].elements.find((element: any) => element.tag === "input");
+  assert.ok(input, "表单里要有输入框");
+  assert.equal(input.name, "ask_input_0");
+  // 表单内每个交互组件都要带 name（含提交按钮），否则整卡被拒
+  for (const element of forms[0].elements) {
+    assert.ok(element.name, `表单组件 ${element.tag} 缺 name`);
+  }
+});
+
 test("卡片发送失败走 sendFailed，不能报成「用户没选」", () => {
   let outcome: any;
   const record = registerAsk("group:test", twoQuestions(), (value) => {
