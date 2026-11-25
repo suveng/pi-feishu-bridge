@@ -39,7 +39,7 @@ import { FeishuScheduleService } from "../../feishu/schedule-service.ts";
 import { FeishuScheduler } from "../../feishu/scheduler.ts";
 import { ScheduleStore } from "../../feishu/schedule-store.ts";
 import { LearnApprovalClient } from "../../feishu/learn-approval.ts";
-import { resolveCardTarget } from "../../feishu/reply-card.ts";
+import { ReplyCard, resolveCardTarget } from "../../feishu/reply-card.ts";
 import { installExitFlush } from "../../feishu/live-cards.ts";
 import { electExtensionLeader } from "../../feishu/process-guard.ts";
 import { daemonCommand, daemonSpec } from "../../feishu/daemon-spec.ts";
@@ -186,6 +186,34 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
     const activeTransport = transport;
     if (!activeTransport) throw new Error("飞书连接未启动");
     await activeTransport.updateCard(messageId, card);
+  });
+  // 外部唤醒轮的兜底卡：异步子 agent 跑完 / 后台任务回传会唤醒会话再跑一轮，
+  // 那一轮没有 prompt 调用方（不收消息、不返回值），这里给它开一张流式卡片，
+  // 否则结果只停在进程里，用户永远等不到通知。
+  conversations.setExternalCardOpener(async (key, meta) => {
+    const activeTransport = transport;
+    if (!activeTransport) {
+      debugLog("feishu.external_card.no_transport", { key, reason: meta.reason });
+      return undefined;
+    }
+    const route = bridgeStore.getRoute(key);
+    if (!route) {
+      debugLog("feishu.external_card.no_route", { key, reason: meta.reason });
+      return undefined;
+    }
+    const cfg = loadConfig();
+    const useStreaming = cfg?.streamingReply !== false;
+    const card = new ReplyCard(key, resolveCardTarget(route), activeTransport, {
+      enabled: useStreaming,
+      printFrequencyMs: cfg?.streamPrintFrequencyMs,
+      printStep: cfg?.streamPrintStep,
+      pushIntervalMs: cfg?.streamPushIntervalMs,
+    });
+    // 标题标明是后台回传：用户很容易把它当成「对某句话的回复」，说清来源
+    card.setTitle("🔔 后台任务回传");
+    await card.start();
+    debugLog("feishu.external_card.open", { key, reason: meta.reason, streaming: useStreaming });
+    return card;
   });
   // 进化审批：把 /learn 的落地变成一道必须过的飞书审批。
   // 审批单的审批人、表单结构在飞书审批定义里；这里只负责拿配置与发起人。

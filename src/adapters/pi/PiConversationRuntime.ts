@@ -13,6 +13,7 @@ import {
 import type { FeishuBridgeRuntime, BridgeJobEvent } from "../../feishu/bridge-runtime.ts";
 import { CHILD_SESSION_ENV, ensureRoot, loadConfig, readJson, STATE_PATH, writeJson } from "../../feishu/config.ts";
 import { debugLog } from "../../feishu/debug.ts";
+import { ExternalCardController, type ExternalCardOpener } from "../../feishu/external-card.ts";
 import { waitForPrompt } from "../../feishu/prompt-timeout.ts";
 import type { ResumeScope, ResumeSessionPage } from "../../feishu/cards.ts";
 import type { ReplyCardSink } from "../../feishu/reply-card.ts";
@@ -132,6 +133,14 @@ export class PiConversationRuntime implements ConversationRuntime {
    * 超时/中断后靠这个能力拿同一个实例号续查，而不是重发一张单。
    */
   private learnApprovalQuerier?: (key: string, instanceCode: string) => Promise<LearnApprovalResult>;
+  /**
+   * 外部唤醒轮的兜底卡能力，由适配器注入（需要飞书连接与路由）。
+   * 异步子 agent 完成 / 后台任务回传会唤醒会话再跑一轮，那一轮没有 prompt 调用方，
+   * 没有这个能力时它的输出会被静默丢弃，用户收不到任何通知。
+   */
+  private externalCardOpener?: ExternalCardOpener;
+  /** 外部唤醒轮的轮次追踪与卡片驱动（纯逻辑，可单测；开卡动作走上面注入的能力） */
+  private readonly externalCards = new ExternalCardController(() => this.externalCardOpener, { log: debugLog });
 
   /** 由适配器注入卡片发送器（飞书连接就绪后调用） */
   setAskSender(sender: (key: string, card: object) => Promise<string | undefined>) {
@@ -153,6 +162,11 @@ export class PiConversationRuntime implements ConversationRuntime {
   /** 由适配器注入卡片更新器：超时后把卡片刷成「已超时」用 */
   setAskCardUpdater(updater: (messageId: string, card: object) => Promise<void>) {
     this.askCardUpdater = updater;
+  }
+
+  /** 由适配器注入「外部唤醒轮」的开卡能力：异步子 agent 跑完后把结果推成一张流式卡片 */
+  setExternalCardOpener(opener: ExternalCardOpener) {
+    this.externalCardOpener = opener;
   }
 
   constructor(
@@ -259,6 +273,8 @@ export class PiConversationRuntime implements ConversationRuntime {
         try { unsub?.(); } catch {}
         run.onDelta = undefined;
         if (this.activeRuns.get(key) === run) this.activeRuns.delete(key);
+        // 记下 prompt 轮结束时间：迟到的空中增量不能算成外部唤醒轮（见 ExternalCardController 的孤儿增量守卫）
+        this.externalCards.notePromptEnd(key);
         this.bridge?.endFeishuInput(session.sessionId);
         this.recordSessionFileStat(key, session.sessionFile);
         this.exitFeishuTurn(key);
@@ -1255,6 +1271,18 @@ export class PiConversationRuntime implements ConversationRuntime {
         if (run.onDelta) run.onDelta(delta);
         else if (run.status && typeof (run.status as any).append === "function") {
           (run.status as any).append(delta);
+        }
+      } else if (delta && !run) {
+        // 没有 prompt 占用时来的增量：异步子 agent 完成 / 后台任务回传唤醒的这一轮。
+        // 原来这里静默丢弃，用户永远等不到「结果出来了」；现在接到兜底卡上。
+        this.externalCards.observeDelta(key, delta);
+      }
+      if (!run) {
+        // 外部唤醒轮的边界：agent_start 开轮、agent_end/agent_settled 收尾。
+        // prompt 轮里 run 一定存在（activeRuns 在 runPrompt 之前就 set），所以不会误判。
+        if (event.type === "agent_start") this.externalCards.begin(key, "agent_start");
+        if (event.type === "agent_end" || event.type === "agent_settled") {
+          void this.externalCards.end(key, () => extractLastAssistantText(session));
         }
       }
       if (event.type === "message_end") {
