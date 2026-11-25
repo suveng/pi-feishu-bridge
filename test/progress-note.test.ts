@@ -14,6 +14,7 @@ import {
   inlineCode,
   progressNeedsElement,
   summarizeToolArgs,
+  toolDetailLimit,
   trimProgressToBytes,
 } from "../src/feishu/progress-note.ts";
 import { buildCardKitCardJson } from "../src/feishu/card-builder.ts";
@@ -48,6 +49,54 @@ test("summarizeToolArgs 超长命令中部省略", () => {
 
 test("summarizeToolArgs 无常见字段时退回 JSON", () => {
   assert.equal(summarizeToolArgs({ foo: "bar" }), '{"foo":"bar"}');
+});
+
+test("选择题工具参数出标题与题数，不打 JSON", () => {
+  const args = {
+    questions: [
+      {
+        header: "推送方案",
+        question: "异步子 agent 完成后要怎么推？",
+        options: [{ label: "a" }, { label: "b" }],
+      },
+      { header: "上线方式", options: [{ label: "c" }] },
+    ],
+  };
+  // 两个工具名都走结构化摘要
+  assert.equal(summarizeToolArgs(args, 200, "feishu_ask"), "推送方案（2 题 / 2 项）");
+  assert.equal(summarizeToolArgs(args, 200, "ask_user_question"), "推送方案（2 题 / 2 项）");
+  // 未登记的普通工具仍走 JSON（回归保护：不能把所有工具都结构化）
+  assert.match(summarizeToolArgs(args, 200, "read"), /\{"questions":/);
+});
+
+test("选择题参数缺 questions 时回落到 JSON", () => {
+  assert.equal(summarizeToolArgs({ foo: "bar" }, 200, "feishu_ask"), '{"foo":"bar"}');
+  assert.equal(summarizeToolArgs({ questions: [] }, 200, "feishu_ask"), '{"questions":[]}');
+});
+
+test("选择题无 header 时用 question 前 16 字", () => {
+  const args = { questions: [{ question: "要不要现在就发版 0.8.5 并装到本工作区？", options: [{}, {}, {}] }] };
+  const out = summarizeToolArgs(args, 200, "feishu_ask");
+  // question 走中部省略（保开头与结尾），所以省略号不在末尾
+  assert.match(out, /（1 题 \/ 3 项）$/);
+  assert.equal(out.includes("…"), true);
+  assert.equal(out.includes("{"), false);
+});
+
+test("toolDetailLimit 按工具类型收紧且不放大配置小值", () => {
+  assert.equal(toolDetailLimit("bash", 200), 60);
+  assert.equal(toolDetailLimit("shell", 200), 60);
+  assert.equal(toolDetailLimit("feishu_ask", 200), 40);
+  assert.equal(toolDetailLimit("read", 200), 200);
+  assert.equal(toolDetailLimit("bash", 30), 30);
+});
+
+test("ProgressTracker 的 bash 行只留前 60 字", () => {
+  const t = tracker("steps");
+  t.start("c1", "bash", { command: `${"a".repeat(80)}${"b".repeat(80)}` }, T0);
+  const text = t.render(T0 + 1000) ?? "";
+  assert.equal(text.includes("b".repeat(70)), false);
+  assert.equal(text.includes("…"), true);
 });
 
 test("formatDuration 分档格式化", () => {

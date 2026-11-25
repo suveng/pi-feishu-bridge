@@ -68,6 +68,28 @@ const DEFAULT_COMMAND_CHARS = 200;
 const DEFAULT_REFRESH_SECONDS = 5;
 /** 折叠面板标题里的命令摘要长度（只有一行，不能占满） */
 const TITLE_DETAIL_CHARS = 30;
+/** 选择题摘要上限：本来就短，40 字足够分辨是哪道题 */
+const STRUCTURED_ARG_CHARS = 40;
+/** 命令行工具的上限：手机上 200 字命令会占满整屏，后半段多是参数噪音 */
+const COMMAND_TOOL_CHARS = 60;
+/** 参数是一整篇结构化 JSON 的工具：自己拼摘要，绝不打印原始 JSON */
+const STRUCTURED_ARG_TOOLS = new Set(["feishu_ask", "ask_user_question"]);
+/** 命令类工具：detail 按更短上限截断 */
+const COMMAND_TOOL_NAMES = new Set(["bash", "shell", "run_command", "exec_command", "terminal"]);
+
+/**
+ * 单个工具在清单里的 detail 上限。
+ * 结构化工具与命令行工具各有更小的上限，其余沿用配置值（commandChars）。
+ * 用 Math.min 是为了不放大用户显式配置的小值。
+ */
+export function toolDetailLimit(
+  toolName: string,
+  commandChars: number = DEFAULT_COMMAND_CHARS,
+): number {
+  if (STRUCTURED_ARG_TOOLS.has(toolName)) return Math.min(STRUCTURED_ARG_CHARS, commandChars);
+  if (COMMAND_TOOL_NAMES.has(toolName)) return Math.min(COMMAND_TOOL_CHARS, commandChars);
+  return commandChars;
+}
 
 /** args 里优先当作「命令」展示的字段（命中即用，避免打印一大坨 JSON） */
 const PREFERRED_ARG_KEYS = [
@@ -83,13 +105,20 @@ const PREFERRED_ARG_KEYS = [
 /**
  * 把工具参数压成一行可读摘要。
  * 优先取常见字段（command / path / ...），否则退回 JSON；统一压成单行并按上限截断。
+ * 选择题类工具（feishu_ask / ask_user_question）单独拼「标题 + 题数 / 选项数」，
+ * 因为它们的参数只有 questions 数组，退回 JSON 会打出一整屏不可读的 JSON。
  */
 export function summarizeToolArgs(
   args: unknown,
   maxChars: number = DEFAULT_COMMAND_CHARS,
+  toolName: string = "",
 ): string {
   let text = "";
   if (args == null) return "";
+  if (STRUCTURED_ARG_TOOLS.has(toolName)) {
+    const summary = summarizeQuestions(args);
+    if (summary) return toSingleLine(summary, maxChars);
+  }
   if (typeof args === "string") {
     text = args;
   } else if (typeof args === "object") {
@@ -110,6 +139,24 @@ export function summarizeToolArgs(
     text = String(args);
   }
   return toSingleLine(text, maxChars);
+}
+
+/**
+ * 选择题参数摘要：`推送方案（2 题 / 4 项）`。
+ * 标题优先取第一题的 header，其次取 question 前 16 字；拼不出结构就返回空串，
+ * 让调用方回落到通用逻辑（宁可打 JSON 也不要显示空）。
+ */
+function summarizeQuestions(args: unknown): string {
+  if (typeof args !== "object" || args === null) return "";
+  const questions = (args as { questions?: unknown }).questions;
+  if (!Array.isArray(questions) || questions.length === 0) return "";
+  const first = (questions[0] ?? {}) as Record<string, unknown>;
+  const header = typeof first.header === "string" ? first.header.trim() : "";
+  const question = typeof first.question === "string" ? toSingleLine(first.question, 16) : "";
+  const name = header || question || "选择题";
+  const optionCount = Array.isArray(first.options) ? first.options.length : 0;
+  const shape = optionCount > 0 ? `${questions.length} 题 / ${optionCount} 项` : `${questions.length} 题`;
+  return `${name}（${shape}）`;
 }
 
 /** 压成单行并按上限截断（中部省略，保住命令开头与结尾） */
@@ -213,15 +260,21 @@ export class ProgressTracker {
   /** 工具开始。同一 toolCallId 重复上报时原地更新，不新增行 */
   start(toolCallId: string, toolName: string, args: unknown, now: number = Date.now()): void {
     if (!toolCallId) return;
+    // 按工具类型收紧 detail 上限：bash 留 60 字，选择题只留标题与题数
+    const detail = summarizeToolArgs(
+      args,
+      toolDetailLimit(toolName, this.opts.commandChars),
+      toolName,
+    );
     const existing = this.byId.get(toolCallId);
     if (existing) {
-      existing.detail = summarizeToolArgs(args, this.opts.commandChars);
+      existing.detail = detail;
       return;
     }
     const entry: ProgressEntry = {
       toolCallId,
       toolName: toolName || "tool",
-      detail: summarizeToolArgs(args, this.opts.commandChars),
+      detail,
       startedAt: now,
     };
     this.byId.set(toolCallId, entry);
