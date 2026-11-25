@@ -74,6 +74,10 @@ const STRUCTURED_ARG_CHARS = 40;
 const COMMAND_TOOL_CHARS = 60;
 /** 参数是一整篇结构化 JSON 的工具：自己拼摘要，绝不打印原始 JSON */
 const STRUCTURED_ARG_TOOLS = new Set(["feishu_ask", "ask_user_question"]);
+/** 委派类工具：最有用的信息是「谁去干 + 干什么」 */
+const DISPATCH_ARG_TOOLS = new Set(["subagent"]);
+/** 委派任务摘要保留多少字（第一行，够看出干啥就够） */
+const DISPATCH_TASK_CHARS = 24;
 /** 命令类工具：detail 按更短上限截断 */
 const COMMAND_TOOL_NAMES = new Set(["bash", "shell", "run_command", "exec_command", "terminal"]);
 
@@ -87,6 +91,7 @@ export function toolDetailLimit(
   commandChars: number = DEFAULT_COMMAND_CHARS,
 ): number {
   if (STRUCTURED_ARG_TOOLS.has(toolName)) return Math.min(STRUCTURED_ARG_CHARS, commandChars);
+  if (DISPATCH_ARG_TOOLS.has(toolName)) return Math.min(STRUCTURED_ARG_CHARS, commandChars);
   if (COMMAND_TOOL_NAMES.has(toolName)) return Math.min(COMMAND_TOOL_CHARS, commandChars);
   return commandChars;
 }
@@ -118,6 +123,10 @@ export function summarizeToolArgs(
   if (STRUCTURED_ARG_TOOLS.has(toolName)) {
     const summary = summarizeQuestions(args);
     if (summary) return toSingleLine(summary, maxChars);
+  }
+  if (DISPATCH_ARG_TOOLS.has(toolName)) {
+    const summary = summarizeDispatch(args, maxChars);
+    if (summary) return summary;
   }
   if (typeof args === "string") {
     text = args;
@@ -157,6 +166,32 @@ function summarizeQuestions(args: unknown): string {
   const optionCount = Array.isArray(first.options) ? first.options.length : 0;
   const shape = optionCount > 0 ? `${questions.length} 题 / ${optionCount} 项` : `${questions.length} 题`;
   return `${name}（${shape}）`;
+}
+
+/**
+ * 委派参数摘要：`reviewer · 对需求 R-20261124-充值订单页查询区重做`。
+ * subagent 的参数是 { agent, task, options } 这种嵌套结构，直接打 JSON 会把
+ * 工具名、上下文、任务全文、输出路径一起贴进卡片（截图里那种一屏乱码）。
+ * 只取 agent 与 task 首行；两样都拿不到就返回空串，让调用方回落。
+ */
+function summarizeDispatch(args: unknown, maxChars: number): string {
+  if (typeof args !== "object" || args === null) return "";
+  const record = args as Record<string, unknown>;
+  // pi-subagents 的入参比看起来多一层：agent 在顶层，task 常在 options 里
+  const options =
+    typeof record.options === "object" && record.options !== null
+      ? (record.options as Record<string, unknown>)
+      : {};
+  const pick = (key: string): string => {
+    const top = typeof record[key] === "string" ? (record[key] as string) : "";
+    const nested = typeof options[key] === "string" ? (options[key] as string) : "";
+    return (top || nested).trim();
+  };
+  const agent = pick("agent");
+  const rawTask = pick("task");
+  const task = rawTask ? toSingleLine(rawTask, DISPATCH_TASK_CHARS) : "";
+  const name = [agent, task].filter(Boolean).join(" · ");
+  return name ? toSingleLine(name, maxChars) : "";
 }
 
 /** 压成单行并按上限截断（中部省略，保住命令开头与结尾） */

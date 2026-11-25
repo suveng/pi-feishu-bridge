@@ -99,6 +99,29 @@ test("ProgressTracker 的 bash 行只留前 60 字", () => {
   assert.equal(text.includes("…"), true);
 });
 
+test("委派工具参数出「谁 · 干什么」，不打 JSON", () => {
+  const args = {
+    agent: "reviewer",
+    async: false,
+    options: {
+      context: "fresh",
+      task: "对需求 R-20261124-充值订单页查询区重做 一一 ④ 有无阻断 / 重要级问题",
+      output: "x",
+    },
+    label: "代码评审",
+  };
+  const out = summarizeToolArgs(args, 40, "subagent");
+  assert.equal(out.startsWith("reviewer · 对需求"), true);
+  assert.equal(out.includes("{"), false);
+  assert.equal(out.length <= 40, true);
+  assert.equal(toolDetailLimit("subagent", 200), 40);
+});
+
+test("委派参数顶层 task 也认，没有 agent/task 时回落 JSON", () => {
+  assert.equal(summarizeToolArgs({ agent: "worker", task: "修单测" }, 40, "subagent"), "worker · 修单测");
+  assert.equal(summarizeToolArgs({ foo: "bar" }, 40, "subagent"), '{"foo":"bar"}');
+});
+
 test("formatDuration 分档格式化", () => {
   assert.equal(formatDuration(320), "320ms");
   assert.equal(formatDuration(1240), "1.2s");
