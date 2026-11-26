@@ -75,6 +75,14 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   if (process.env[CHILD_SESSION_ENV] === "1") {
     return;
   }
+  // pi-subagents 子进程（PI_SUBAGENT_CHILD=1）：从飞书 daemon 会话派发时会继承
+  // PI_FEISHU_DAEMON=1，若走下方 daemon 自启分支会抢单例失败后 process.exit(0)，
+  // 把整个子会话打死（评审等子任务根本没跑）。子进程不参与桥接：
+  // 清掉继承的 daemon flag（防 restart/stop 分支误判、防再传给孙进程）并直接返回。
+  if (process.env.PI_SUBAGENT_CHILD === "1") {
+    delete process.env.PI_FEISHU_DAEMON;
+    return;
+  }
 
   // 作用域隔离：插件在全局 `~/.pi/agent/npm` 与工作区 `.pi/npm` 可以各装一份，两份都留着。
   // Pi 会按两个解析路径各加载一次，本进程只需其中一份初始化：
